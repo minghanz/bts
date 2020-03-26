@@ -1,0 +1,2 @@
+python ../utils/eval_with_pngs.py --pred_path result_bts_eigen_v2_pytorch_resnet50/raw --dataset vkitti --filenames_file /root/repos/monodepth2/splits/vkitti/test_files_bts.txt \
+--do_kb_crop --garg_crop

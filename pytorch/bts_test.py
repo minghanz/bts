@@ -34,6 +34,11 @@ from tqdm import tqdm
 
 from bts_dataloader import *
 
+import sys
+script_path = os.path.dirname(__file__)
+sys.path.append(os.path.join(script_path, '../../monodepth2'))
+from cvo_utils import NormalFromDepthDense
+
 
 def convert_arg_line_to_args(arg_line):
     for arg in arg_line.split():
@@ -58,6 +63,8 @@ parser.add_argument('--dataset', type=str, help='dataset to train on, make3d or 
 parser.add_argument('--do_kb_crop', help='if set, crop input images as kitti benchmark images', action='store_true')
 parser.add_argument('--save_lpg', help='if set, save outputs from lpg layers', action='store_true')
 parser.add_argument('--bts_size', type=int,   help='initial num_filters in bts', default=512)
+parser.add_argument('--save_np', help='if set, save outputs in npy file', action='store_true')
+parser.add_argument('--save_normal', help='if set, save disp and normal outputs in png file', action='store_true')
 
 if sys.argv.__len__() == 2:
     arg_filename_with_prefix = '@' + sys.argv[1]
@@ -80,6 +87,26 @@ def get_num_lines(file_path):
     f.close()
     return len(lines)
 
+def save_np_to_img(nparray, filename, mode):
+    """Input is C*H*W or H*W"""
+    # nparray = tsor.cpu().detach().numpy()
+    if "rgb" in mode:
+        nparray = nparray.transpose(1,2,0)
+        nparray = (nparray * 255).astype(np.uint8)
+        Imode = "RGB"
+    elif "dep" in mode: # H*W
+        nparray = (nparray /nparray.max() * 255).astype(np.uint8)
+        # nparray = (nparray[:,:,:,0] * 255).astype(np.uint8) # disable normalization since disp is already in [0, 1]
+        Imode = "L"
+    elif "nml" in mode:
+        nparray = nparray.transpose(1,2,0)
+        nparray = (nparray * 255).astype(np.uint8)
+        Imode = "RGB"
+    else:
+        raise ValueError("mode {} not recognized".format(mode))
+    # for ib in range(nparray.shape[0]):
+    img = Image.fromarray(nparray, mode=Imode)
+    img.save("{}_{}.png".format(filename, mode))
 
 def test(params):
     """Test function."""
@@ -88,6 +115,12 @@ def test(params):
     
     model = BtsModel(params=args)
     model = torch.nn.DataParallel(model)
+
+    if args.save_normal:
+        normal_model = NormalFromDepthDense()
+        normal_model = torch.nn.DataParallel(normal_model)
+        normal_model.eval()
+        normal_model.cuda()
     
     checkpoint = torch.load(args.checkpoint_path)
     model.load_state_dict(checkpoint['model'])
@@ -107,9 +140,19 @@ def test(params):
     pred_2x2s = []
     pred_1x1s = []
 
+    if args.save_normal:
+        normals = []
+        K = np.array([[725.0087, 0, 620.5, 0], 
+                        [0, 725.0087, 187, 0], 
+                        [0, 0, 1, 0], 
+                        [0, 0, 0, 1]])
+        K[0, :] = K[0, :] / 1242 * 1216
+        K[1, :] = K[1, :] / 375 * 352
+        K = torch.from_numpy(np.array([K]).astype(np.float32)).cuda()
+
     start_time = time.time()
     with torch.no_grad():
-        for _, sample in enumerate(tqdm(dataloader.data)):
+        for i, sample in enumerate(tqdm(dataloader.data)):
             image = Variable(sample['image'].cuda())
             focal = Variable(sample['focal'].cuda())
             # Predict
@@ -120,11 +163,23 @@ def test(params):
             pred_2x2s.append(lpg2x2[0].cpu().numpy().squeeze())
             pred_1x1s.append(reduc1x1[0].cpu().numpy().squeeze())
 
+            if args.save_normal:
+                # print("depth_est.shape", depth_est.shape)
+                normal = normal_model(depth_est, K) *0.5 + 0.5
+                normals.append(normal.cpu().numpy().squeeze())
+
+
     elapsed_time = time.time() - start_time
     print('Elapesed time: %s' % str(elapsed_time))
     print('Done.')
     
-    save_name = 'result_' + args.model_name
+    save_name = 'result_' + args.model_name + args.dataset
+
+    if args.save_np:
+        depth_stack = np.stack(pred_depths)
+        output_path = "{}.npy".format(save_name)
+        np.save(output_path, depth_stack)
+        return
     
     print('Saving result pngs..')
     if not os.path.exists(os.path.dirname(save_name)):
@@ -152,13 +207,13 @@ def test(params):
             filename_image_png = save_name + '/rgb/' + lines[s].split()[0].split('/')[-1]
         else:
             scene_name = lines[s].split()[0].split('/')[0]
-            filename_pred_png = save_name + '/raw/' + scene_name + '_' + lines[s].split()[0].split('/')[1].replace(
+            filename_pred_png = save_name + '/raw/' + scene_name + '_' + lines[s].split()[0].split('/')[-1].replace(
                 '.jpg', '.png')
-            filename_cmap_png = save_name + '/cmap/' + scene_name + '_' + lines[s].split()[0].split('/')[1].replace(
+            filename_cmap_png = save_name + '/cmap/' + scene_name + '_' + lines[s].split()[0].split('/')[-1].replace(
                 '.jpg', '.png')
-            filename_gt_png = save_name + '/gt/' + scene_name + '_' + lines[s].split()[0].split('/')[1].replace(
+            filename_gt_png = save_name + '/gt/' + scene_name + '_' + lines[s].split()[0].split('/')[-1].replace(
                 '.jpg', '.png')
-            filename_image_png = save_name + '/rgb/' + scene_name + '_' + lines[s].split()[0].split('/')[1]
+            filename_image_png = save_name + '/rgb/' + scene_name + '_' + lines[s].split()[0].split('/')[-1]
         
         rgb_path = os.path.join(args.data_path, './' + lines[s].split()[0])
         image = cv2.imread(rgb_path)
@@ -173,13 +228,26 @@ def test(params):
         pred_2x2 = pred_2x2s[s]
         pred_1x1 = pred_1x1s[s]
         
-        if args.dataset == 'kitti' or args.dataset == 'kitti_benchmark':
+        if args.dataset == 'kitti' or args.dataset == 'kitti_benchmark'or args.dataset == 'vkitti':
             pred_depth_scaled = pred_depth * 256.0
         else:
             pred_depth_scaled = pred_depth * 1000.0
-        
+
         pred_depth_scaled = pred_depth_scaled.astype(np.uint16)
         cv2.imwrite(filename_pred_png, pred_depth_scaled, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+
+        if args.save_normal:
+            ######### here we want to process each numpy array of depth (H*W) and normal (C*H*W) and save them
+            ### depth image: change to inverse depth
+            min_depth=2
+            max_depth=80
+            pred_depth_clamped = np.clip(pred_depth, min_depth, None)
+            pred_disp_clamped = 1/pred_depth_clamped
+            save_np_to_img(pred_disp_clamped, filename_pred_png, "dep")
+            normal = normals[s]
+            save_np_to_img(normal, filename_pred_png, "nml")
+
+
         
         if args.save_lpg:
             cv2.imwrite(filename_image_png, image[10:-1 - 9, 10:-1 - 9, :])

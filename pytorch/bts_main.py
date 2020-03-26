@@ -15,7 +15,6 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>
 
 import time
-import argparse
 import datetime
 import sys
 import os
@@ -38,86 +37,19 @@ from tqdm import tqdm
 from bts import BtsModel
 from bts_dataloader import *
 
+from c3d_loss import C3DLoss
+from bts_main_argparse import parse_args_main
 
-def convert_arg_line_to_args(arg_line):
-    for arg in arg_line.split():
-        if not arg.strip():
-            continue
-        yield arg
+script_path = os.path.dirname(__file__)
+sys.path.append(os.path.join(script_path, "../../monodepth2"))
+from cvo_utils import save_tensor_to_img
 
-
-parser = argparse.ArgumentParser(description='BTS PyTorch implementation.', fromfile_prefix_chars='@')
-parser.convert_arg_line_to_args = convert_arg_line_to_args
-
-parser.add_argument('--mode',                      type=str,   help='train or test', default='train')
-parser.add_argument('--model_name',                type=str,   help='model name', default='bts_eigen_v2')
-parser.add_argument('--encoder',                   type=str,   help='type of encoder, desenet121_bts, densenet161_bts, '
-                                                                    'resnet101_bts, resnet50_bts, resnext50_bts or resnext101_bts',
-                                                               default='densenet161_bts')
-# Dataset
-parser.add_argument('--dataset',                   type=str,   help='dataset to train on, kitti or nyu', default='nyu')
-parser.add_argument('--data_path',                 type=str,   help='path to the data', required=True)
-parser.add_argument('--gt_path',                   type=str,   help='path to the groundtruth data', required=True)
-parser.add_argument('--filenames_file',            type=str,   help='path to the filenames text file', required=True)
-parser.add_argument('--input_height',              type=int,   help='input height', default=480)
-parser.add_argument('--input_width',               type=int,   help='input width',  default=640)
-parser.add_argument('--max_depth',                 type=float, help='maximum depth in estimation', default=10)
-
-# Log and save
-parser.add_argument('--log_directory',             type=str,   help='directory to save checkpoints and summaries', default='')
-parser.add_argument('--checkpoint_path',           type=str,   help='path to a checkpoint to load', default='')
-parser.add_argument('--log_freq',                  type=int,   help='Logging frequency in global steps', default=100)
-parser.add_argument('--save_freq',                 type=int,   help='Checkpoint saving frequency in global steps', default=500)
-
-# Training
-parser.add_argument('--fix_first_conv_blocks',                 help='if set, will fix the first two conv blocks', action='store_true')
-parser.add_argument('--fix_first_conv_block',                  help='if set, will fix the first conv block', action='store_true')
-parser.add_argument('--bn_no_track_stats',                     help='if set, will not track running stats in batch norm layers', action='store_true')
-parser.add_argument('--weight_decay',              type=float, help='weight decay factor for optimization', default=1e-2)
-parser.add_argument('--bts_size',                  type=int,   help='initial num_filters in bts', default=512)
-parser.add_argument('--retrain',                               help='if used with checkpoint_path, will restart training from step zero', action='store_true')
-parser.add_argument('--adam_eps',                  type=float, help='epsilon in Adam optimizer', default=1e-6)
-parser.add_argument('--batch_size',                type=int,   help='batch size', default=4)
-parser.add_argument('--num_epochs',                type=int,   help='number of epochs', default=50)
-parser.add_argument('--learning_rate',             type=float, help='initial learning rate', default=1e-4)
-parser.add_argument('--end_learning_rate',         type=float, help='end learning rate', default=-1)
-parser.add_argument('--variance_focus',            type=float, help='lambda in paper: [0, 1], higher value more focus on minimizing variance of error', default=0.85)
-
-# Preprocessing
-parser.add_argument('--do_random_rotate',                      help='if set, will perform random rotation for augmentation', action='store_true')
-parser.add_argument('--degree',                    type=float, help='random rotation maximum degree', default=2.5)
-parser.add_argument('--do_kb_crop',                            help='if set, crop input images as kitti benchmark images', action='store_true')
-parser.add_argument('--use_right',                             help='if set, will randomly use right images when train on KITTI', action='store_true')
-
-# Multi-gpu training
-parser.add_argument('--num_threads',               type=int,   help='number of threads to use for data loading', default=1)
-parser.add_argument('--world_size',                type=int,   help='number of nodes for distributed training', default=1)
-parser.add_argument('--rank',                      type=int,   help='node rank for distributed training', default=0)
-parser.add_argument('--dist_url',                  type=str,   help='url used to set up distributed training', default='tcp://127.0.0.1:1234')
-parser.add_argument('--dist_backend',              type=str,   help='distributed backend', default='nccl')
-parser.add_argument('--gpu',                       type=int,   help='GPU id to use.', default=None)
-parser.add_argument('--multiprocessing_distributed',           help='Use multi-processing distributed training to launch '
-                                                                    'N processes per node, which has N GPUs. This is the '
-                                                                    'fastest way to use PyTorch for either single node or '
-                                                                    'multi node data parallel training', action='store_true',)
-# Online eval
-parser.add_argument('--do_online_eval',                        help='if set, perform online eval in every eval_freq steps', action='store_true')
-parser.add_argument('--data_path_eval',            type=str,   help='path to the data for online evaluation', required=False)
-parser.add_argument('--gt_path_eval',              type=str,   help='path to the groundtruth data for online evaluation', required=False)
-parser.add_argument('--filenames_file_eval',       type=str,   help='path to the filenames text file for online evaluation', required=False)
-parser.add_argument('--min_depth_eval',            type=float, help='minimum depth for evaluation', default=1e-3)
-parser.add_argument('--max_depth_eval',            type=float, help='maximum depth for evaluation', default=80)
-parser.add_argument('--eigen_crop',                            help='if set, crops according to Eigen NIPS14', action='store_true')
-parser.add_argument('--garg_crop',                             help='if set, crops according to Garg  ECCV16', action='store_true')
-parser.add_argument('--eval_freq',                 type=int,   help='Online evaluation frequency in global steps', default=500)
-parser.add_argument('--eval_summary_directory',    type=str,   help='output directory for eval summary,'
-                                                                    'if empty outputs to checkpoint folder', default='')
+from bts_utils import vis_depth
 
 if sys.argv.__len__() == 2:
-    arg_filename_with_prefix = '@' + sys.argv[1]
-    args = parser.parse_args([arg_filename_with_prefix])
+    args, args_rest = parse_args_main()
 else:
-    args = parser.parse_args()
+    args = parse_args_main()
 
 if args.mode == 'train' and not args.checkpoint_path:
     from bts import *
@@ -319,7 +251,7 @@ def online_eval(model, dataloader_eval, gpu, ngpus):
     return None
 
 
-def main_worker(gpu, ngpus_per_node, args):
+def main_worker(gpu, ngpus_per_node, args, args_rest):
     args.gpu = gpu
 
     if args.gpu is not None:
@@ -367,6 +299,11 @@ def main_worker(gpu, ngpus_per_node, args):
     best_eval_measures_higher_better = torch.zeros(3).cpu()
     best_eval_steps = np.zeros(9, dtype=np.int32)
 
+    # C3D module
+    c3d_model = C3DLoss(args.data_path, batch_size=args.batch_size)
+    c3d_model.parse_opts(args_rest)
+    c3d_model.cuda()
+
     # Training parameters
     optimizer = torch.optim.AdamW([{'params': model.module.encoder.parameters(), 'weight_decay': args.weight_decay},
                                    {'params': model.module.decoder.parameters(), 'weight_decay': 0}],
@@ -406,13 +343,17 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Logging
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
-        writer = SummaryWriter(args.log_directory + '/' + args.model_name + '/summaries', flush_secs=30)
+        writer_path = os.path.join(args.log_directory, 'tbsummary', args.model_name)
+        writer = SummaryWriter(writer_path+"_train", flush_secs=30)
+        # writer = SummaryWriter(args.log_directory + '/' + args.model_name + '/summaries', flush_secs=30)
         if args.do_online_eval:
-            if args.eval_summary_directory != '':
-                eval_summary_path = os.path.join(args.eval_summary_directory, args.model_name)
-            else:
-                eval_summary_path = os.path.join(args.log_directory, 'eval')
-            eval_summary_writer = SummaryWriter(eval_summary_path, flush_secs=30)
+            # if args.eval_summary_directory != '':
+            #     eval_summary_path = os.path.join(args.eval_summary_directory, args.model_name)
+            # else:
+            #     eval_summary_path = os.path.join(args.log_directory, 'eval')
+            # eval_summary_writer = SummaryWriter(eval_summary_path, flush_secs=30)
+            
+            eval_summary_writer = SummaryWriter(writer_path+"_eval", flush_secs=30)
 
     silog_criterion = silog_loss(variance_focus=args.variance_focus)
 
@@ -446,13 +387,28 @@ def main_worker(gpu, ngpus_per_node, args):
 
             lpg8x8, lpg4x4, lpg2x2, reduc1x1, depth_est = model(image, focal)
 
+            depth_mask = sample_batched['mask'].cuda(args.gpu, non_blocking=True)
+            depth_gt_mask = sample_batched['mask_gt'].cuda(args.gpu, non_blocking=True)
+            date_side = (sample_batched['date_str'], sample_batched['side'])
+            inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, date_side, xy_crop=sample_batched['xy_crop'] ) 
+
             if args.dataset == 'nyu':
                 mask = depth_gt > 0.1
             else:
                 mask = depth_gt > 1.0
 
+            #### can see that the mask_gt is (at least visually) the same as mask generated above.
+            # save_tensor_to_img(depth_mask, os.path.join(args.log_directory, args.model_name, '{}_pred'.format(global_step) ), 'mask')
+            # save_tensor_to_img(depth_gt_mask, os.path.join(args.log_directory, args.model_name, '{}_gt'.format(global_step) ), 'mask')
+            # save_tensor_to_img(mask, os.path.join(args.log_directory, args.model_name, '{}_ori'.format(global_step) ), 'mask')
+
             loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
-            loss.backward()
+            # loss.backward()
+            if args.c3d_in_loss:
+                loss_total = loss - inp*1e-5
+            else:
+                loss_total = loss
+            loss_total.backward()
             for param_group in optimizer.param_groups:
                 current_lr = (args.learning_rate - end_learning_rate) * (1 - global_step / num_total_steps) ** 0.9 + end_learning_rate
                 param_group['lr'] = current_lr
@@ -484,17 +440,24 @@ def main_worker(gpu, ngpus_per_node, args):
                     writer.add_scalar('silog_loss', loss, global_step)
                     writer.add_scalar('learning_rate', current_lr, global_step)
                     writer.add_scalar('var average', var_sum.item()/var_cnt, global_step)
+                    writer.add_scalar('c3d inp', inp, global_step) # cvo logging
+                    writer.add_scalar('loss_total', loss_total, global_step) # cvo logging
                     depth_gt = torch.where(depth_gt < 1e-3, depth_gt * 0 + 1e3, depth_gt)
-                    for i in range(num_log_images):
-                        writer.add_image('depth_gt/image/{}'.format(i), normalize_result(1/depth_gt[i, :, :, :].data), global_step)
-                        writer.add_image('depth_est/image/{}'.format(i), normalize_result(1/depth_est[i, :, :, :].data), global_step)
+                    batch_size_cur = depth_gt.shape[0]  # this fixes a bug which may not always occur because it happenss only when the logging iteration (once every args.log_freq) happens to be the last mini-batch in a epoch.
+                    for i in range(batch_size_cur):
+                        writer.add_image('depth_gt/image/{}'.format(i), vis_depth(depth_gt[i, :, :, :]), global_step)
+                        writer.add_image('depth_est/image/{}'.format(i), vis_depth(depth_est[i, :, :, :]), global_step)
                         writer.add_image('reduc1x1/image/{}'.format(i), normalize_result(1/reduc1x1[i, :, :, :].data), global_step)
                         writer.add_image('lpg2x2/image/{}'.format(i), normalize_result(1/lpg2x2[i, :, :, :].data), global_step)
                         writer.add_image('lpg4x4/image/{}'.format(i), normalize_result(1/lpg4x4[i, :, :, :].data), global_step)
                         writer.add_image('lpg8x8/image/{}'.format(i), normalize_result(1/lpg8x8[i, :, :, :].data), global_step)
                         writer.add_image('image/image/{}'.format(i), inv_normalize(image[i, :, :, :]).data, global_step)
+                        writer.add_image('mask/image/{}'.format(i), depth_mask[i, :, :, :].data, global_step)
+                        writer.add_image('mask_gt/image/{}'.format(i), depth_gt_mask[i, :, :, :].data, global_step)
+                        writer.add_image('mask_ori/image/{}'.format(i), mask[i, :, :, :].data, global_step)
                     writer.flush()
 
+            ## Minghan: If not do_online_eval, models are saved per save_freq
             if not args.do_online_eval and global_step and global_step % args.save_freq == 0:
                 if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
                     checkpoint = {'global_step': global_step,
@@ -502,6 +465,7 @@ def main_worker(gpu, ngpus_per_node, args):
                                   'optimizer': optimizer.state_dict()}
                     torch.save(checkpoint, args.log_directory + '/' + args.model_name + '/model-{}'.format(global_step))
 
+            ## Minghan: If do_online_eval, models are evaled per eval_freq, and saved if is the best in terms of some metrics
             if args.do_online_eval and global_step and global_step % args.eval_freq == 0 and not model_just_loaded:
                 time.sleep(0.1)
                 model.eval()
@@ -554,8 +518,14 @@ def main():
         print('bts_main.py is only for training. Use bts_test.py instead.')
         return -1
 
-    model_filename = args.model_name + '.py'
-    command = 'mkdir ' + args.log_directory + '/' + args.model_name
+    ctime = time.ctime()
+    ctime = ctime.replace(' ', '_')
+    args.model_name = args.model_name + '/' + ctime
+
+    # model_filename = args.model_name + '.py'
+    model_filename = 'bts.py'
+
+    command = 'mkdir -p ' + args.log_directory + '/' + args.model_name
     os.system(command)
 
     args_out_path = args.log_directory + '/' + args.model_name + '/' + sys.argv[1]
@@ -573,8 +543,9 @@ def main():
         os.system(command)
     else:
         loaded_model_dir = os.path.dirname(args.checkpoint_path)
-        loaded_model_name = os.path.basename(loaded_model_dir)
-        loaded_model_filename = loaded_model_name + '.py'
+        loaded_model_filename = model_filename
+        # loaded_model_name = os.path.basename(loaded_model_dir)
+        # loaded_model_filename = loaded_model_name + '.py'
 
         model_out_path = args.log_directory + '/' + args.model_name + '/' + model_filename
         command = 'cp ' + loaded_model_dir + '/' + loaded_model_filename + ' ' + model_out_path
@@ -595,9 +566,9 @@ def main():
 
     if args.multiprocessing_distributed:
         args.world_size = ngpus_per_node * args.world_size
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args, args_rest))
     else:
-        main_worker(args.gpu, ngpus_per_node, args)
+        main_worker(args.gpu, ngpus_per_node, args, args_rest)
 
 
 if __name__ == '__main__':

@@ -206,6 +206,8 @@ def test(params):
                 
                 if args.dataset == 'nyu':
                     depth = depth.astype(np.float32) / 1000.0
+                elif args.dataset == 'vkitti':
+                    depth = depth.astype(np.float32) / 100.0
                 else:
                     depth = depth.astype(np.float32) / 256.0
                 
@@ -265,6 +267,11 @@ def eval(pred_depths, step):
             pred_depth_uncropped = np.zeros((height, width), dtype=np.float32)
             pred_depth_uncropped[top_margin:top_margin + 352, left_margin:left_margin + 1216] = pred_depth
             pred_depth = pred_depth_uncropped
+        
+        if args.dataset == "vkitti":
+            height = gt_depth.shape[0]
+            gt_depth[:int(height/2)] = 0
+            pred_depth = cv2.resize(pred_depth, (1242, 375))
         
         pred_depth[pred_depth < args.min_depth_eval] = args.min_depth_eval
         pred_depth[pred_depth > args.max_depth_eval] = args.max_depth_eval

@@ -44,10 +44,16 @@ parser.add_argument('--min_depth_eval',      type=float, help='minimum depth for
 parser.add_argument('--max_depth_eval',      type=float, help='maximum depth for evaluation', default=80)
 parser.add_argument('--do_kb_crop',                      help='if set, crop input images as kitti benchmark images', action='store_true')
 
+parser.add_argument('--filenames_file', type=str, help='path to the filenames text file', required=False)
 args = parser.parse_args()
 
 
 def compute_errors(gt, pred):
+
+    # print("pred_depth max min", pred.max(), pred.min())
+
+    # print("gt_depth max min", gt.max(), gt.min())
+
     thresh = np.maximum((gt / pred), (pred / gt))
     d1 = (thresh < 1.25).mean()
     d2 = (thresh < 1.25 ** 2).mean()
@@ -77,14 +83,29 @@ def test():
     missing_ids = set()
     pred_filenames = []
 
-    for root, dirnames, filenames in os.walk(args.pred_path):
-        for pred_filename in fnmatch.filter(filenames, '*.png'):
-            if 'cmap' in pred_filename or 'gt' in pred_filename:
-                continue
-            dirname = root.replace(args.pred_path, '')
-            pred_filenames.append(os.path.join(dirname, pred_filename))
+    if args.dataset != "vkitti":
+        for root, dirnames, filenames in os.walk(args.pred_path):
+            for pred_filename in fnmatch.filter(filenames, '*.png'):
+                if 'cmap' in pred_filename or 'gt' in pred_filename:
+                    continue
+                dirname = root.replace(args.pred_path, '')
+                pred_filenames.append(os.path.join(dirname, pred_filename))
 
-    num_test_samples = len(pred_filenames)
+        num_test_samples = len(pred_filenames)
+
+    else:
+        with open(args.filenames_file) as f:
+            lines = f.readlines()
+        num_test_samples = len(lines)
+
+        pred_filenames = []
+        gt_filenames = []
+        for line in lines:
+            ori_file, gt_file, focal = line.split()
+            pred_file = "{}_{}.png".format(ori_file.split("/")[0], ori_file.split("/")[-1].split(".")[0]) # "/root/repos/bts/pytorch/result_bts_eigen_v2_pytorch_resnet50/raw"
+            pred_filenames.append(pred_file)
+            gt_filenames.append(os.path.join("/media/sda1/minghanz/datasets/vkitti2", gt_file))
+
 
     pred_depths = []
 
@@ -100,6 +121,8 @@ def test():
             pred_depth = pred_depth.astype(np.float32) / 1000.0
         else:
             pred_depth = pred_depth.astype(np.float32) / 256.0
+
+            # print("pred_depth max min", pred_depth.max(), pred_depth.min())
 
         pred_depths.append(pred_depth)
 
@@ -135,6 +158,18 @@ def test():
 
             depth = depth.astype(np.float32) / 1000.0
             gt_depths.append(depth)
+
+    elif args.dataset == 'vkitti':
+        for t_id in range(num_test_samples):
+            depth = cv2.imread(gt_filenames[i], -1)
+            if depth is None:
+                print('Missing: %s ' % gt_depth_path)
+                missing_ids.add(t_id)
+                continue
+            depth = depth.astype(np.float32) / 100.0
+            # print("gt depth max min", depth.max(), depth.min())
+            gt_depths.append(depth)
+
 
     print('GT files reading done')
     print('{} GT files missing'.format(len(missing_ids)))
@@ -181,6 +216,11 @@ def eval(pred_depths):
         gt_depth[np.isinf(gt_depth)] = 0
         gt_depth[np.isnan(gt_depth)] = 0
 
+        if args.dataset == "vkitti":
+            print("gt_depth.shape", gt_depth.shape)
+            height = gt_depth.shape[0]
+            gt_depth[:int(height/2)] = 0
+
         valid_mask = np.logical_and(gt_depth > args.min_depth_eval, gt_depth < args.max_depth_eval)
 
         if args.do_kb_crop:
@@ -190,6 +230,10 @@ def eval(pred_depths):
             pred_depth_uncropped = np.zeros((height, width), dtype=np.float32)
             pred_depth_uncropped[top_margin:top_margin + 352, left_margin:left_margin + 1216] = pred_depth
             pred_depth = pred_depth_uncropped
+
+        else:
+            if args.dataset == "vkitti":
+                pred_depth = cv2.resize(pred_depth, (1242, 375))
 
         if args.garg_crop or args.eigen_crop:
             gt_height, gt_width = gt_depth.shape

@@ -25,6 +25,11 @@ import random
 
 from distributed_sampler_no_evenly_divisible import *
 
+import cv2
+from skimage.morphology import binary_dilation, binary_closing
+from sampler_kitti import SamplerKITTI
+from bts_pre_intr import preload_K, load_velodyne_points, lidar_to_depth
+import re
 
 def _is_pil_image(img):
     return isinstance(img, Image.Image)
@@ -46,15 +51,22 @@ class BtsDataLoader(object):
             self.training_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode))
             if args.distributed:
                 self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.training_samples)
+                
+                self.data = DataLoader(self.training_samples, args.batch_size,
+                                    shuffle=(self.train_sampler is None),
+                                    num_workers=args.num_threads,
+                                    pin_memory=True,
+                                    sampler=self.train_sampler)
             else:
-                self.train_sampler = None
-    
-            self.data = DataLoader(self.training_samples, args.batch_size,
-                                   shuffle=(self.train_sampler is None),
-                                   num_workers=args.num_threads,
-                                   pin_memory=True,
-                                   sampler=self.train_sampler)
+                # self.train_sampler = None
+                self.train_sampler = SamplerKITTI(self.training_samples, args.batch_size)   # to make sure all samples in a mini-batch have the same intrinsics
+                                    
+                self.data = DataLoader(self.training_samples, 
+                                    num_workers=args.num_threads,
+                                    pin_memory=True,
+                                    batch_sampler=self.train_sampler)
 
+        ## for batch size 1, there is no need to use SamplerKITTI
         elif mode == 'online_eval':
             self.testing_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode))
             if args.distributed:
@@ -90,10 +102,34 @@ class DataLoadPreprocess(Dataset):
         self.transform = transform
         self.to_tensor = ToTensor
         self.is_for_online_eval = is_for_online_eval
+
+        self.dilate_struct = np.ones((35, 35))
+
+        ## separate the lines to different dates
+        self.lines_in_date = {}
+        dates = ["2011_09_26", "2011_09_28", "2011_09_29", "2011_09_30", "2011_10_03"]
+        for date in dates:
+            self.lines_in_date[date] = []
+        
+        for i, line in enumerate(self.filenames):
+            date = line.split('/')[0]
+            assert date in dates
+            self.lines_in_date[date].append(i)
+
+        self.K_dict = preload_K(args.data_path)
+
+        self.regex_dep2lid = re.compile('.+?sync')
+
     
     def __getitem__(self, idx):
         sample_path = self.filenames[idx]
         focal = float(sample_path.split()[2])
+
+        path_strs = sample_path.split()[0].split('/')
+        date_str = path_strs[0]
+        seq_str = path_strs[1]
+        side = int(path_strs[2].split('_')[1])
+        frame = int(path_strs[-1].split('.')[0])
 
         if self.mode == 'train':
             if self.args.dataset == 'kitti' and self.args.use_right is True and random.random() > 0.5:
@@ -104,7 +140,27 @@ class DataLoadPreprocess(Dataset):
                 depth_path = os.path.join(self.args.gt_path, "./" + sample_path.split()[1])
     
             image = Image.open(image_path)
-            depth_gt = Image.open(depth_path)
+            if self.args.data_source == 'kitti_depth':
+                depth_gt = Image.open(depth_path)
+            elif self.args.data_source == 'kitti_raw':
+                seq_path = self.regex_dep2lid.search(depth_path)
+                seq_path = seq_path.group(0)
+                lidar_path = os.path.join(seq_path, 'velodyne_points', 'data', '{:010d}.bin'.format(frame))
+                # 2011_09_26/2011_09_26_drive_0001_sync/velodyne_points/data/0000000000.bin
+                velo = load_velodyne_points(lidar_path)
+                velo = velo[ velo[:, 0] >= 0, : ]
+                K_unit = self.K_dict[(date_str, side)].K_unit
+                extr_cam_li = self.K_dict[(date_str, side)].P_cam_li
+                im_shape = (image.height, image.width)
+                assert image.height == self.K_dict[(date_str, side)].height
+                assert image.width == self.K_dict[(date_str, side)].width
+                depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape)
+                # print(depth_gt.min(), depth_gt.max(), depth_gt.dtype)
+                depth_gt = Image.fromarray(depth_gt.astype(np.float32), 'F') #mode 'F' means float32
+                # depth_gt_ary = np.array(depth_gt)
+                # print(depth_gt_ary.min(), depth_gt_ary.max(), depth_gt_ary.dtype)
+            else:
+                raise ValueError("args.data_source not recognized")
             
             if self.args.do_kb_crop is True:
                 height = image.height
@@ -126,16 +182,29 @@ class DataLoadPreprocess(Dataset):
             
             image = np.asarray(image, dtype=np.float32) / 255.0
             depth_gt = np.asarray(depth_gt, dtype=np.float32)
+
+            mask_gt = depth_gt > 0
+            mask = binary_closing(mask_gt, self.dilate_struct)
+
             depth_gt = np.expand_dims(depth_gt, axis=2)
+            mask_gt = np.expand_dims(mask_gt, axis=2)
+            mask = np.expand_dims(mask, axis=2)
 
             if self.args.dataset == 'nyu':
                 depth_gt = depth_gt / 1000.0
-            else:
+            elif self.args.data_source == 'kitti_depth':
                 depth_gt = depth_gt / 256.0
 
-            image, depth_gt = self.random_crop(image, depth_gt, self.args.input_height, self.args.input_width)
-            image, depth_gt = self.train_preprocess(image, depth_gt)
-            sample = {'image': image, 'depth': depth_gt, 'focal': focal}
+            image, depth_gt, mask, mask_gt, x_start, y_start = self.random_crop(image, depth_gt, mask, mask_gt, self.args.input_height, self.args.input_width)
+            image, depth_gt, mask, mask_gt = self.train_preprocess(image, depth_gt, mask, mask_gt)
+
+            if self.args.do_kb_crop is True:
+                x_start = x_start + left_margin
+                y_start = y_start + top_margin
+            x_size = self.args.input_width
+            y_size = self.args.input_height
+            xy_crop = (x_start, y_start, x_size, y_size)
+            sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop}
         
         else:
             if self.mode == 'online_eval':
@@ -156,14 +225,43 @@ class DataLoadPreprocess(Dataset):
                 except IOError:
                     depth_gt = False
                     # print('Missing gt for {}'.format(image_path))
+                    mask_gt = False
+                    mask = False
 
                 if has_valid_depth:
-                    depth_gt = np.asarray(depth_gt, dtype=np.float32)
+                    if self.args.data_source == 'kitti_depth':
+                        depth_gt = np.asarray(depth_gt, dtype=np.float32)
+                    elif self.args.data_source == 'kitti_raw':
+                        seq_path = self.regex_dep2lid.search(depth_path)
+                        seq_path = seq_path.group(0)
+                        lidar_path = os.path.join(seq_path, 'velodyne_points', 'data', '{:010d}.bin'.format(frame))
+                        # 2011_09_26/2011_09_26_drive_0001_sync/velodyne_points/data/0000000000.bin
+                        velo = load_velodyne_points(lidar_path)
+                        velo = velo[ velo[:, 0] >= 0, : ]
+                        K_unit = self.K_dict[(date_str, side)].K_unit
+                        extr_cam_li = self.K_dict[(date_str, side)].P_cam_li
+                        im_shape = (image.shape[0], image.shape[1])
+                        assert image.shape[0] == self.K_dict[(date_str, side)].height
+                        assert image.shape[1] == self.K_dict[(date_str, side)].width
+                        depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape)
+                        depth_gt = depth_gt.astype(np.float32)
+                        # depth_gt = Image.fromarray(depth_gt.astype(np.float32), 'F') #mode 'F' means float32
+                        # depth_gt_ary = np.array(depth_gt)
+                        # print(depth_gt_ary.min(), depth_gt_ary.max(), depth_gt_ary.dtype)
+                    else:
+                        raise ValueError("args.data_source not recognized")
+
+                    mask_gt = depth_gt > 0
+                    mask = binary_closing(mask_gt, self.dilate_struct)
+
                     depth_gt = np.expand_dims(depth_gt, axis=2)
                     if self.args.dataset == 'nyu':
                         depth_gt = depth_gt / 1000.0
-                    else:
+                    elif self.args.data_source == 'kitti_depth':
                         depth_gt = depth_gt / 256.0
+
+                    mask_gt = np.expand_dims(mask_gt, axis=2)
+                    mask = np.expand_dims(mask, axis=2)
 
             if self.args.do_kb_crop is True:
                 height = image.shape[0]
@@ -173,9 +271,27 @@ class DataLoadPreprocess(Dataset):
                 image = image[top_margin:top_margin + 352, left_margin:left_margin + 1216, :]
                 if self.mode == 'online_eval' and has_valid_depth:
                     depth_gt = depth_gt[top_margin:top_margin + 352, left_margin:left_margin + 1216, :]
+                    mask_gt = mask_gt[top_margin:top_margin + 352, left_margin:left_margin + 1216, :]
+                    mask = mask[top_margin:top_margin + 352, left_margin:left_margin + 1216, :]
+            else:
+                image = cv2.resize(image, (1216, 352))      ## TODO: resize is not handled in c3d_loss
+                if self.mode == 'online_eval' and has_valid_depth:
+                    depth_gt = cv2.resize(depth_gt, (1216, 352))      ## TODO: resize mode is not taken care of for depth and masks
+                    mask = cv2.resize(mask, (1216, 352))
+                    mask_gt = cv2.resize(mask_gt, (1216, 352))      
+
+                
+            x_start = 0
+            y_start = 0
+            if self.args.do_kb_crop is True:
+                x_start = x_start + left_margin
+                y_start = y_start + top_margin
+            x_size = 1216
+            y_size = 352
+            xy_crop = (x_start, y_start, x_size, y_size)
             
             if self.mode == 'online_eval':
-                sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'has_valid_depth': has_valid_depth}
+                sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'has_valid_depth': has_valid_depth, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop}
             else:
                 sample = {'image': image, 'focal': focal}
         
@@ -188,7 +304,7 @@ class DataLoadPreprocess(Dataset):
         result = image.rotate(angle, resample=flag)
         return result
 
-    def random_crop(self, img, depth, height, width):
+    def random_crop(self, img, depth, mask, mask_gt, height, width):
         assert img.shape[0] >= height
         assert img.shape[1] >= width
         assert img.shape[0] == depth.shape[0]
@@ -197,21 +313,25 @@ class DataLoadPreprocess(Dataset):
         y = random.randint(0, img.shape[0] - height)
         img = img[y:y + height, x:x + width, :]
         depth = depth[y:y + height, x:x + width, :]
-        return img, depth
+        mask = mask[y:y + height, x:x + width, :]
+        mask_gt = mask_gt[y:y + height, x:x + width, :]
+        return img, depth, mask, mask_gt, x, y
 
-    def train_preprocess(self, image, depth_gt):
+    def train_preprocess(self, image, depth_gt, mask, mask_gt):
         # Random flipping
         do_flip = random.random()
         if do_flip > 0.5:
             image = (image[:, ::-1, :]).copy()
             depth_gt = (depth_gt[:, ::-1, :]).copy()
+            mask = (mask[:, ::-1, :]).copy()
+            mask_gt = (mask_gt[:, ::-1, :]).copy()
     
         # Random gamma, brightness, color augmentation
         do_augment = random.random()
         if do_augment > 0.5:
             image = self.augment_image(image)
     
-        return image, depth_gt
+        return image, depth_gt, mask, mask_gt
     
     def augment_image(self, image):
         # gamma augmentation
@@ -252,12 +372,17 @@ class ToTensor(object):
             return {'image': image, 'focal': focal}
 
         depth = sample['depth']
+        mask = sample['mask']
+        mask_gt = sample['mask_gt']
         if self.mode == 'train':
             depth = self.to_tensor(depth)
-            return {'image': image, 'depth': depth, 'focal': focal}
+            mask = self.to_tensor(mask)
+            mask_gt = self.to_tensor(mask_gt)
+            
+            return {'image': image, 'depth': depth, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop']}
         else:
             has_valid_depth = sample['has_valid_depth']
-            return {'image': image, 'depth': depth, 'focal': focal, 'has_valid_depth': has_valid_depth}
+            return {'image': image, 'depth': depth, 'focal': focal, 'has_valid_depth': has_valid_depth, 'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop']}
     
     def to_tensor(self, pic):
         if not (_is_pil_image(pic) or _is_numpy_image(pic)):

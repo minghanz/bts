@@ -1,0 +1,47 @@
+--mode train
+--model_name bts_eigen_v2_pytorch_test
+--encoder densenet161_bts
+--dataset kitti
+--data_path /media/sda1/minghanz/datasets/kitti/kitti_data/
+--gt_path /media/sda1/minghanz/datasets/kitti/kitti_data/
+--filenames_file ../train_test_inputs/eigen_train_files_with_gt_jpg_fullpath.txt
+--batch_size 4
+--num_epochs 50
+--learning_rate 1e-4
+--weight_decay 1e-2
+--adam_eps 1e-3
+--num_threads 1
+--input_height 352
+--input_width 704
+--max_depth 80
+--do_kb_crop
+--do_random_rotate
+--degree 1.0
+--log_directory ./models
+#--multiprocessing_distributed
+# --dist_url tcp://127.0.0.1:2345
+--data_source kitti_raw
+# --c3d_in_loss
+
+--log_freq 100
+--do_online_eval
+--eval_freq 500
+--data_path_eval /media/sda1/minghanz/datasets/kitti/kitti_data/
+--gt_path_eval /media/sda1/minghanz/datasets/kitti/kitti_data/
+--filenames_file_eval ../train_test_inputs/eigen_test_files_with_gt_jpg_fullpath.txt
+--min_depth_eval 1e-3
+--max_depth_eval 80
+--eval_summary_directory ./models/eval
+--garg_crop
+
+--ell_basedist 10
+--ell_keys xyz hsv
+--ell_values_min 0.05 0.2
+--ell_values_rand 0.1 0
+--use_normal 3
+--neg_nkern_to_zero
+# --norm_in_dist
+--res_mag_min 0.1
+--res_mag_max 2
+--neighbor_range 2
+--normal_nrange 9
