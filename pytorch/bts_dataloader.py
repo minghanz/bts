@@ -46,9 +46,9 @@ def preprocessing_transforms(mode):
 
 
 class BtsDataLoader(object):
-    def __init__(self, args, mode):
+    def __init__(self, args, mode, data_source=None):
         if mode == 'train':
-            self.training_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode))
+            self.training_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode), data_source=data_source)
             if args.distributed:
                 self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.training_samples)
                 
@@ -68,7 +68,7 @@ class BtsDataLoader(object):
 
         ## for batch size 1, there is no need to use SamplerKITTI
         elif mode == 'online_eval':
-            self.testing_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode))
+            self.testing_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode), data_source=data_source)
             if args.distributed:
                 # self.eval_sampler = torch.utils.data.distributed.DistributedSampler(self.testing_samples, shuffle=False)
                 self.eval_sampler = DistributedSamplerNoEvenlyDivisible(self.testing_samples, shuffle=False)
@@ -81,7 +81,7 @@ class BtsDataLoader(object):
                                    sampler=self.eval_sampler)
         
         elif mode == 'test':
-            self.testing_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode))
+            self.testing_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode), data_source=data_source)
             self.data = DataLoader(self.testing_samples, 1, shuffle=False, num_workers=1)
 
         else:
@@ -89,7 +89,7 @@ class BtsDataLoader(object):
             
             
 class DataLoadPreprocess(Dataset):
-    def __init__(self, args, mode, transform=None, is_for_online_eval=False):
+    def __init__(self, args, mode, transform=None, data_source=None):
         self.args = args
         if mode == 'online_eval':
             with open(args.filenames_file_eval, 'r') as f:
@@ -101,7 +101,7 @@ class DataLoadPreprocess(Dataset):
         self.mode = mode
         self.transform = transform
         self.to_tensor = ToTensor
-        self.is_for_online_eval = is_for_online_eval
+        # self.is_for_online_eval = is_for_online_eval
 
         self.dilate_struct = np.ones((35, 35))
 
@@ -119,6 +119,11 @@ class DataLoadPreprocess(Dataset):
         self.K_dict = preload_K(args.data_path)
 
         self.regex_dep2lid = re.compile('.+?sync')
+
+        if data_source is None:
+            self.data_source = self.args.data_source
+        else:
+            self.data_source = data_source
 
     
     def __getitem__(self, idx):
@@ -140,9 +145,9 @@ class DataLoadPreprocess(Dataset):
                 depth_path = os.path.join(self.args.gt_path, "./" + sample_path.split()[1])
     
             image = Image.open(image_path)
-            if self.args.data_source == 'kitti_depth':
+            if self.data_source == 'kitti_depth':
                 depth_gt = Image.open(depth_path)
-            elif self.args.data_source == 'kitti_raw':
+            elif self.data_source == 'kitti_raw':
                 seq_path = self.regex_dep2lid.search(depth_path)
                 seq_path = seq_path.group(0)
                 lidar_path = os.path.join(seq_path, 'velodyne_points', 'data', '{:010d}.bin'.format(frame))
@@ -160,7 +165,7 @@ class DataLoadPreprocess(Dataset):
                 # depth_gt_ary = np.array(depth_gt)
                 # print(depth_gt_ary.min(), depth_gt_ary.max(), depth_gt_ary.dtype)
             else:
-                raise ValueError("args.data_source not recognized")
+                raise ValueError("self.data_source not recognized")
             
             if self.args.do_kb_crop is True:
                 height = image.height
@@ -192,7 +197,7 @@ class DataLoadPreprocess(Dataset):
 
             if self.args.dataset == 'nyu':
                 depth_gt = depth_gt / 1000.0
-            elif self.args.data_source == 'kitti_depth':
+            elif self.data_source == 'kitti_depth':
                 depth_gt = depth_gt / 256.0
 
             image, depth_gt, mask, mask_gt, x_start, y_start = self.random_crop(image, depth_gt, mask, mask_gt, self.args.input_height, self.args.input_width)
@@ -229,9 +234,9 @@ class DataLoadPreprocess(Dataset):
                     mask = False
 
                 if has_valid_depth:
-                    if self.args.data_source == 'kitti_depth':
+                    if self.data_source == 'kitti_depth':
                         depth_gt = np.asarray(depth_gt, dtype=np.float32)
-                    elif self.args.data_source == 'kitti_raw':
+                    elif self.data_source == 'kitti_raw':
                         seq_path = self.regex_dep2lid.search(depth_path)
                         seq_path = seq_path.group(0)
                         lidar_path = os.path.join(seq_path, 'velodyne_points', 'data', '{:010d}.bin'.format(frame))
@@ -249,7 +254,7 @@ class DataLoadPreprocess(Dataset):
                         # depth_gt_ary = np.array(depth_gt)
                         # print(depth_gt_ary.min(), depth_gt_ary.max(), depth_gt_ary.dtype)
                     else:
-                        raise ValueError("args.data_source not recognized")
+                        raise ValueError("self.data_source not recognized")
 
                     mask_gt = depth_gt > 0
                     mask = binary_closing(mask_gt, self.dilate_struct)
@@ -257,7 +262,7 @@ class DataLoadPreprocess(Dataset):
                     depth_gt = np.expand_dims(depth_gt, axis=2)
                     if self.args.dataset == 'nyu':
                         depth_gt = depth_gt / 1000.0
-                    elif self.args.data_source == 'kitti_depth':
+                    elif self.data_source == 'kitti_depth':
                         depth_gt = depth_gt / 256.0
 
                     mask_gt = np.expand_dims(mask_gt, axis=2)
@@ -292,7 +297,7 @@ class DataLoadPreprocess(Dataset):
             
             if self.mode == 'online_eval':
                 sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'has_valid_depth': has_valid_depth, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop}
-            else:
+            else:   ## i.e. self.mode == 'test'. Only input image is needed. 
                 sample = {'image': image, 'focal': focal}
         
         if self.transform:

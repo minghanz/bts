@@ -21,11 +21,12 @@
 #--multiprocessing_distributed
 # --dist_url tcp://127.0.0.1:2345
 --data_source kitti_raw
-# --c3d_in_loss
+--c3d_in_loss_weight 1e-4
 
---log_freq 100
+--save_freq 5
+--log_freq 1000
 --do_online_eval
---eval_freq 500
+# --eval_freq 500
 --data_path_eval /media/sda1/minghanz/datasets/kitti/kitti_data/
 --gt_path_eval /media/sda1/minghanz/datasets/kitti/kitti_data/
 --filenames_file_eval ../train_test_inputs/eigen_test_files_with_gt_jpg_fullpath.txt
