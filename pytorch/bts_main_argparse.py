@@ -34,7 +34,7 @@ def parse_args_main():
     parser.add_argument('--log_directory',             type=str,   help='directory to save checkpoints and summaries', default='')
     parser.add_argument('--checkpoint_path',           type=str,   help='path to a checkpoint to load', default='')
     parser.add_argument('--log_freq',                  type=int,   help='Logging frequency in global steps', default=100)
-    # parser.add_argument('--save_freq',                 type=int,   help='Checkpoint saving frequency in global steps', default=500)
+    parser.add_argument('--save_freq',                 type=int,   help='Checkpoint saving frequency in global steps', default=500)
 
     # Training
     parser.add_argument('--fix_first_conv_blocks',                 help='if set, will fix the first two conv blocks', action='store_true')
@@ -49,7 +49,11 @@ def parse_args_main():
     parser.add_argument('--learning_rate',             type=float, help='initial learning rate', default=1e-4)
     parser.add_argument('--end_learning_rate',         type=float, help='end learning rate', default=-1)
     parser.add_argument('--variance_focus',            type=float, help='lambda in paper: [0, 1], higher value more focus on minimizing variance of error', default=0.85)
-    parser.add_argument('--c3d_in_loss_weight',        type=float, help='weight for continuous 3D loss in back proped in training') # add by Minghan
+    parser.add_argument('--c3d_weight',                type=float, help='weight for continuous 3D loss in back proped in training') # add by Minghan
+    parser.add_argument('--silog_weight',              type=float, help='weight for si_log loss in back proped in training') # add by Minghan
+    parser.add_argument("--seq_frame_n",               type=int,   help="neighbor range when calculating normal direction on sparse point cloud", default=1 )
+    parser.add_argument("--batch_same_intr",                       help="neighbor range when calculating normal direction on sparse point cloud", action='store_true' )
+    
 
     # Preprocessing
     parser.add_argument('--do_random_rotate',                      help='if set, will perform random rotation for augmentation', action='store_true')

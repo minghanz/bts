@@ -263,7 +263,7 @@ class bts(nn.Module):
         if self.params.dataset == 'kitti':
             final_depth = final_depth * focal.view(-1, 1, 1, 1).float() / 715.0873
         
-        return depth_8x8_scaled, depth_4x4_scaled, depth_2x2_scaled, reduc1x1, final_depth
+        return depth_8x8_scaled, depth_4x4_scaled, depth_2x2_scaled, reduc1x1, final_depth, iconv1
 
 class encoder(nn.Module):
     def __init__(self, params):

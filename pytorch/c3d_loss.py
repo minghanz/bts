@@ -78,15 +78,40 @@ def set_from_intr(intr, batch_size, device=None):
 
     return uvb_grid, xy1_grid, width_cur, height_cur, K
 
-def init_pc3d():
-    pcl_c3d = EasyDict()
-    pcl_c3d.flat = EasyDict()
-    pcl_c3d.grid = EasyDict()
-    pcl_c3d.flat.uvb = None
-    pcl_c3d.flat.feature = EasyDict()
-    pcl_c3d.grid.mask = None
-    pcl_c3d.grid.feature = EasyDict() 
-    return pcl_c3d 
+class PCL_C3D_Flat:
+    def __init__(self):
+        self.uvb = None
+        self.nb = []
+        self.feature = EasyDict()
+
+class PCL_C3D_Grid:
+    def __init__(self):
+        self.mask = None
+        self.feature = EasyDict()
+
+class PCL_C3D:
+    def __init__(self):
+        self.flat = PCL_C3D_Flat()
+        self.grid = PCL_C3D_Grid()
+
+# def init_pc3d():
+#     pcl_c3d = EasyDict()
+#     pcl_c3d.frame_id = None
+
+#     pcl_c3d.flat = EasyDict()
+#     pcl_c3d.flat.uvb = None
+#     pcl_c3d.flat.feature = EasyDict()
+
+#     pcl_c3d.grid = EasyDict()
+#     pcl_c3d.grid.mask = None
+#     pcl_c3d.grid.feature = EasyDict() 
+
+#     pcl_c3d.flat_tr = EasyDict()
+#     pcl_c3d.flat_tr.uvb = None
+#     pcl_c3d.flat_tr.feature = EasyDict()
+#     pcl_c3d.flat_tr.frame_id = None
+
+#     return pcl_c3d 
 
 def load_simp_pc3d(pcl_c3d, mask_grid, uvb_flat, feat_grid, feat_flat):
     batch_size = mask_grid.shape[0]
@@ -104,6 +129,7 @@ def load_simp_pc3d(pcl_c3d, mask_grid, uvb_flat, feat_grid, feat_flat):
     mask_flat = mask_grid.reshape(batch_size, 1, -1)
     for ib in range(batch_size):
         mask_vec = mask_flat[ib, 0]
+        pcl_c3d.flat.nb.append(int(mask_vec.sum()))
         pcl_c3d.flat.uvb.append(uvb_flat[[ib]][:,:, mask_vec])
         for feat in feat_flat:
             pcl_c3d.flat.feature[feat].append(feat_flat[feat][[ib]][:,:, mask_vec])      # 1*C*N
@@ -163,6 +189,86 @@ def load_pc3d(pcl_c3d, depth_grid, mask_grid, xy1_grid, uvb_flat, K_cur, feat_co
 
     return pcl_c3d
 
+def transform_pc3d(pcl_c3d, Ts, seq_n, K_cur, batch_n):
+
+    ## conduct pose transform if needed
+    ## need to transform: flat.uvb, flat.feature['xyz'], flat.feature['normal']
+    ## no need to transform grid features
+    
+    assert batch_n % seq_n == 0    # mode==0
+    n_group = batch_n // seq_n
+
+    ## get relative pose
+    T = []
+    R = []
+    t = []
+    target_id = []
+    for n_g in range(n_group):
+        for n_f in range(seq_n):
+            n = n_g * seq_n + n_f
+            T1 = Ts[n]
+            if n_f == seq_n-1:
+                tid = n_g * seq_n
+            else:
+                tid = n+1
+            target_id.append(tid)
+            T2 = Ts[tid]
+            T21 = torch.matmul( torch.inverse(T2), T1 )
+            T.append(T21)
+            R21 = T21[:3, :3]
+            R.append(R21)
+            t21 = T21[:3, [3]]
+            t.append(t21)
+
+    ## get accumulative length
+    nb = pcl_c3d.flat.nb
+    acc_b = []
+    acc = 0
+    acc_b.append( acc )
+    for ib in range(batch_n):
+        acc = acc + nb[ib]
+        acc_b.append( acc )
+
+    ## process flat features
+    flat_xyz = pcl_c3d.flat.feature['xyz']      # 1*C*NB
+    flat_normal = pcl_c3d.flat.feature['normal']
+    trans_normal_list = []
+    trans_xyz_list = []
+    uvb_list = []
+    new_nb = []
+    for ib in range(batch_n):
+        ## xyz
+        trans_xyz = torch.matmul(R[ib], flat_xyz[:, :, acc_b[ib]:acc_b[ib+1]]) + t[ib]
+        mask_positive = trans_xyz[0, 2, :] > 0
+        trans_xyz = trans_xyz[:, :, mask_positive]
+        trans_xyz_list.append(trans_xyz)
+        new_nb.append(trans_xyz.shape[2])
+
+        ## normal
+        trans_normal = torch.matmul(R[ib], flat_normal[:, :, acc_b[ib]:acc_b[ib+1]])
+        trans_normal = trans_normal[:, :, mask_positive]
+        trans_normal_list.append(trans_normal)
+
+        ## project to uv, add b
+        uvb = torch.matmul(K_cur[ib], trans_xyz)
+        uvb[:, :2] = uvb[:, :2] / uvb[:, [2]] - 1
+        uvb[:, 2, :] = target_id[ib]
+        uvb_list.append(uvb)
+
+    ## construct the new object
+    tr_pcl_c3d = PCL_C3D_Flat()
+    tr_pcl_c3d.feature['xyz'] = torch.cat(trans_xyz_list, dim=2)
+    tr_pcl_c3d.feature['normal'] = torch.cat(trans_normal_list, dim=2)
+    tr_pcl_c3d.uvb = torch.cat(uvb_list, dim=2)
+    tr_pcl_c3d.nb = new_nb
+
+    for feat_key in pcl_c3d.flat.feature:
+        if feat_key not in ['xyz', 'normal']:
+            tr_pcl_c3d.feature[feat_key] = pcl_c3d.flat.feature[feat_key]
+
+    return tr_pcl_c3d
+    
+
 def read_calib_file(path):
     """Read KITTI calibration file
     (from https://github.com/hunse/kitti)
@@ -185,7 +291,9 @@ def read_calib_file(path):
     return data
 
 def preload_K(data_root):
-    "Designed for KITTI dataset. Preload intrinsic params, which is different for each date"
+    '''Designed for KITTI dataset. Preload intrinsic params, which is different for each date
+    K_dict[(date, side)]: a dict with attrbutes: width, height, K_unit
+    '''
     dates = os.listdir(data_root)
     K_dict = {}
     for date in dates:
@@ -206,10 +314,11 @@ def preload_K(data_root):
     return K_dict
 
 class C3DLoss(nn.Module):
-    def __init__(self, data_root, batch_size=None):
+    def __init__(self, data_root, batch_size=None, seq_frame_n=1):
         super(C3DLoss, self).__init__()
         self.width = {}
         self.height = {}
+        self.seq_frame_n = seq_frame_n
         # self.K = {}
         # self.uvb_flat = {}
         # self.xy1_flat = {}
@@ -254,6 +363,11 @@ class C3DLoss(nn.Module):
         parser.add_argument("--ell_values_rand",       nargs="+", type=float, default=[0.1, 0], 
                             help="parameter of randomness for values of ells corresponding to ell_keys")
 
+        parser.add_argument("--ell_predpred_min",        nargs="+", type=float, default=[0.05, 0.1], 
+                            help="min values of ells corresponding to ell_keys, for inner product between both predictions")
+        parser.add_argument("--ell_predpred_rand",       nargs="+", type=float, default=[0.1, 0], 
+                            help="parameter of randomness for values of ells corresponding to ell_keys, for inner product between both predictions")
+
         parser.add_argument("--use_normal",            type=int, default=0, 
                             help="if set, normal vectors of sparse pcls are from PtSampleInGridCalcNormal, while those of dense images are from NormalFromDepthDense")
         parser.add_argument("--neg_nkern_to_zero",     action="store_true",
@@ -269,6 +383,8 @@ class C3DLoss(nn.Module):
                             help="neighbor range when calculating inner product")
         parser.add_argument("--normal_nrange",         type=int, default=5,
                             help="neighbor range when calculating normal direction on sparse point cloud")
+        parser.add_argument("--pred_pred_weight",        type=float, default=0,
+                            help="weight of c3d loss between cross-frame predictions relative to gt_pred_weight as 1. You may want to set to less than 1 because predictions are denser than gt.")
 
         self.opts, rest = parser.parse_known_args(args=inputs) # inputs can be None, in which case _sys.argv[1:] are parsed
 
@@ -278,6 +394,13 @@ class C3DLoss(nn.Module):
             self.opts.ell_min[ell_item] = self.opts.ell_values_min[i]
             self.opts.ell_rand[ell_item] = self.opts.ell_values_rand[i]
 
+        if self.opts.pred_pred_weight > 0:
+            self.opts.ell_min_predpred = {}
+            self.opts.ell_rand_predpred = {}
+            for i, ell_item in enumerate(self.opts.ell_keys):
+                self.opts.ell_min_predpred[ell_item] = self.opts.ell_predpred_min[i]
+                self.opts.ell_rand_predpred[ell_item] = self.opts.ell_predpred_rand[i]
+
         self.nml_opts = EasyDict() # nml_opts.neighbor_range, nml_opts.ignore_ib, nml_opts.min_dist_2
         self.nml_opts.normal_nrange = int(self.opts.normal_nrange)
         self.nml_opts.ignore_ib = False
@@ -285,7 +408,7 @@ class C3DLoss(nn.Module):
 
         return rest
 
-    def forward(self, rgb, depth, depth_gt, depth_mask, depth_gt_mask, date_side=None, xy_crop=None, intr=None, nkern_fname=None):
+    def forward(self, rgb, depth, depth_gt, depth_mask, depth_gt_mask, date_side=None, xy_crop=None, intr=None, nkern_fname=None, Ts=None):
         """
         rgb: B*3*H*W
         depth, depth_gt, depth_mask, depth_gt_mask: B*1*H*W
@@ -295,8 +418,10 @@ class C3DLoss(nn.Module):
 
         batch_size = rgb.shape[0]       ## if drop_last is False in Sampler/DataLoader, then the batch_size is not constant. 
         if intr is not None:
+            ## use input intrinsics to generate needed parameters now
             uvb_grid_cur, xy1_grid_cur, width_cur, height_cur, K_cur = set_from_intr(intr, batch_size, device=rgb.device)
         else:
+            ## retrieve from preloaded parameters
             xy1_grid_cur = self.xy1_grid(date_side)
             uvb_grid_cur = self.uvb_grid(date_side)
             width_cur = self.width[date_side]
@@ -309,6 +434,7 @@ class C3DLoss(nn.Module):
             uvb_grid_cur = uvb_grid_cur[:batch_size]
             K_cur = K_cur[:batch_size]
 
+        ## crop the grids and modify intrinsics to match the cropped image
         if xy_crop is not None:
             x_size = xy_crop[2][0]
             y_size = xy_crop[3][0]
@@ -325,7 +451,7 @@ class C3DLoss(nn.Module):
                 K_crop[ib, 0, 2] = K_crop[ib, 0, 2] - x_start
                 K_crop[ib, 1, 2] = K_crop[ib, 1, 2] - y_start
             K_cur = K_crop
-            width_cur = x_size
+            width_cur = x_size      # cropped width and height are deterministic
             height_cur = y_size
             xy1_grid_cur = xy1_grid_crop
             uvb_grid_cur = uvb_grid_crop
@@ -333,8 +459,10 @@ class C3DLoss(nn.Module):
         uvb_flat_cur = uvb_grid_cur.reshape(batch_size, 3, -1)
 
         pc3ds = EasyDict()
-        pc3ds["gt"] = init_pc3d()
-        pc3ds["pred"] = init_pc3d()
+        # pc3ds["gt"] = init_pc3d()
+        # pc3ds["pred"] = init_pc3d()
+        pc3ds["gt"] = PCL_C3D()
+        pc3ds["pred"] = PCL_C3D()
 
         ## rgb to hsv
         hsv = rgb_to_hsv(rgb, flat=False)           # B*3*H*W
@@ -345,42 +473,63 @@ class C3DLoss(nn.Module):
         feat_comm_flat = {}
         feat_comm_flat['hsv'] = hsv_flat
         
+        ## generate PCL_C3D object
         pc3ds["gt"] = load_pc3d(pc3ds["gt"], depth_gt, depth_gt_mask, xy1_grid_cur, uvb_flat_cur, K_cur, feat_comm_grid, feat_comm_flat, sparse=True, use_normal=self.opts.use_normal, sparse_nml_opts=self.nml_opts)
         pc3ds["pred"] = load_pc3d(pc3ds["pred"], depth, depth_mask, xy1_grid_cur, uvb_flat_cur, K_cur, feat_comm_grid, feat_comm_flat, sparse=False, use_normal=self.opts.use_normal, dense_nml_op=self.normal_op_dense)
+
+        self.flag_cross_frame = Ts is not None and self.seq_frame_n > 1
+        self.flag_cross_frame_predpred = self.flag_cross_frame and self.opts.pred_pred_weight > 0
+        if self.flag_cross_frame:
+            pc3ds["gt_trans_flat"] = transform_pc3d(pc3ds["gt"], Ts, self.seq_frame_n, K_cur, batch_size)
+        if self.flag_cross_frame_predpred:
+            pc3ds["pred_trans_flat"] = transform_pc3d(pc3ds["pred"], Ts, self.seq_frame_n, K_cur, batch_size)
         
         ## random ell
-        self.ell = {}
+        ell = {}
         for key in self.opts.ell_keys:
-            self.ell[key] = self.opts.ell_min[key] + np.abs(self.opts.ell_rand[key]* np.random.normal()) 
-
-        inp = self.calc_inn_pc3d(pc3ds["gt"], pc3ds["pred"], nkern_fname)
+            ell[key] = self.opts.ell_min[key] + np.abs(self.opts.ell_rand[key]* np.random.normal()) 
         
-        return inp
+        if self.flag_cross_frame_predpred:
+            ell_predpred = {}
+            for key in self.opts.ell_keys:
+                ell_predpred[key] = self.opts.ell_min_predpred[key] + np.abs(self.opts.ell_rand_predpred[key]* np.random.normal()) 
+
+        ## calculate inner product
+        inp = self.calc_inn_pc3d(pc3ds["gt"].flat, pc3ds["pred"].grid, ell, nkern_fname)
+        inp_total = inp
+
+        if self.flag_cross_frame:
+            inp_cross_frame = self.calc_inn_pc3d(pc3ds["gt_trans_flat"], pc3ds["pred"].grid, ell, None) # TODO: specify the nkern_fname here
+            inp_total = inp_total + inp_cross_frame
+        if self.flag_cross_frame_predpred:
+            inp_predpred = self.calc_inn_pc3d(pc3ds["pred_trans_flat"], pc3ds["pred"].grid, ell_predpred, None) # TODO: specify the nkern_fname here
+            inp_total = inp_total + inp_predpred * self.opts.pred_pred_weight
+        
+        return inp_total
     
-    def calc_inn_pc3d(self, pc3d_sp, pc3d_dn, nkern_fname=None):
-        assert pc3d_sp.flat.feature.keys() == pc3d_dn.flat.feature.keys()
-        assert pc3d_sp.grid.feature.keys() == pc3d_dn.grid.feature.keys()
+    def calc_inn_pc3d(self, pc3d_flat, pc3d_grid, ell, nkern_fname=None):
+        assert pc3d_flat.feature.keys() == pc3d_grid.feature.keys()
 
         inp_feat_dict = {}
 
         for feat in self.feat_inp_self:
             if feat == "hsv":
-                inp_feat_dict[feat] = PtSampleInGrid.apply(pc3d_sp.flat.uvb.contiguous(), pc3d_sp.flat.feature[feat].contiguous(), pc3d_dn.grid.feature[feat].contiguous(), pc3d_dn.grid.mask.contiguous(), \
-                    self.opts.neighbor_range, self.ell[feat], False, False, self.opts.ell_basedist) # ignore_ib=False, sqr=False
+                inp_feat_dict[feat] = PtSampleInGrid.apply(pc3d_flat.uvb.contiguous(), pc3d_flat.feature[feat].contiguous(), pc3d_grid.feature[feat].contiguous(), pc3d_grid.mask.contiguous(), \
+                    self.opts.neighbor_range, ell[feat], False, False, self.opts.ell_basedist) # ignore_ib=False, sqr=False
             elif feat == "xyz":
                 if self.opts.use_normal > 0:
                     if nkern_fname is None:
-                        inp_feat_dict[feat] = PtSampleInGridWithNormal.apply(pc3d_sp.flat.uvb.contiguous(), pc3d_sp.flat.feature[feat].contiguous(), pc3d_dn.grid.feature[feat].contiguous(), \
-                            pc3d_dn.grid.mask.contiguous(), pc3d_sp.flat.feature['normal'], pc3d_sp.grid.feature['normal'], pc3d_sp.flat.feature['nres'], pc3d_sp.grid.feature['nres'], \
-                                self.opts.neighbor_range, self.ell[feat], self.opts.res_mag_max, self.opts.res_mag_min, False, self.opts.norm_in_dist, self.opts.neg_nkern_to_zero, self.opts.ell_basedist, False, None) 
+                        inp_feat_dict[feat] = PtSampleInGridWithNormal.apply(pc3d_flat.uvb.contiguous(), pc3d_flat.feature[feat].contiguous(), pc3d_grid.feature[feat].contiguous(), \
+                            pc3d_grid.mask.contiguous(), pc3d_flat.feature['normal'], pc3d_grid.feature['normal'], pc3d_flat.feature['nres'], pc3d_grid.feature['nres'], \
+                                self.opts.neighbor_range, ell[feat], self.opts.res_mag_max, self.opts.res_mag_min, False, self.opts.norm_in_dist, self.opts.neg_nkern_to_zero, self.opts.ell_basedist, False, None) 
                                 # ignore_ib=False, return_nkern=False, filename=None
                     else:
-                        inp_feat_dict[feat] = PtSampleInGridWithNormal.apply(pc3d_sp.flat.uvb.contiguous(), pc3d_sp.flat.feature[feat].contiguous(), pc3d_dn.grid.feature[feat].contiguous(), \
-                            pc3d_dn.grid.mask.contiguous(), pc3d_sp.flat.feature['normal'], pc3d_sp.grid.feature['normal'], pc3d_sp.flat.feature['nres'], pc3d_sp.grid.feature['nres'], \
-                                self.opts.neighbor_range, self.ell[feat], self.opts.res_mag_max, self.opts.res_mag_min, False, self.opts.norm_in_dist, self.opts.neg_nkern_to_zero, self.opts.ell_basedist, True, nkern_fname)
+                        inp_feat_dict[feat] = PtSampleInGridWithNormal.apply(pc3d_flat.uvb.contiguous(), pc3d_flat.feature[feat].contiguous(), pc3d_grid.feature[feat].contiguous(), \
+                            pc3d_grid.mask.contiguous(), pc3d_flat.feature['normal'], pc3d_grid.feature['normal'], pc3d_flat.feature['nres'], pc3d_grid.feature['nres'], \
+                                self.opts.neighbor_range, ell[feat], self.opts.res_mag_max, self.opts.res_mag_min, False, self.opts.norm_in_dist, self.opts.neg_nkern_to_zero, self.opts.ell_basedist, True, nkern_fname)
                 else:
-                    inp_feat_dict[feat] = PtSampleInGrid.apply(pc3d_sp.flat.uvb.contiguous(), pc3d_sp.flat.feature[feat].contiguous(), pc3d_dn.grid.feature[feat].contiguous(), pc3d_dn.grid.mask.contiguous(), \
-                        self.opts.neighbor_range, self.ell[feat], False, False, self.opts.ell_basedist) # ignore_ib=False, sqr=False
+                    inp_feat_dict[feat] = PtSampleInGrid.apply(pc3d_flat.uvb.contiguous(), pc3d_flat.feature[feat].contiguous(), pc3d_grid.feature[feat].contiguous(), pc3d_grid.mask.contiguous(), \
+                        self.opts.neighbor_range, ell[feat], False, False, self.opts.ell_basedist) # ignore_ib=False, sqr=False
             elif feat == "normal":
                 pass
             elif feat == "panop":

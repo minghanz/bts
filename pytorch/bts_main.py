@@ -44,7 +44,7 @@ script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, "../../monodepth2"))
 from cvo_utils import save_tensor_to_img
 
-from bts_utils import vis_depth
+from bts_utils import vis_depth, overlay_dep_on_rgb
 
 if sys.argv.__len__() == 2:
     args, args_rest = parse_args_main()
@@ -191,7 +191,7 @@ def online_eval(model, dataloader_eval, gpu, ngpus):
                 # print('Invalid depth. continue.')
                 continue
 
-            _, _, _, _, pred_depth = model(image, focal)
+            _, _, _, _, pred_depth, _ = model(image, focal)
 
             pred_depth = pred_depth.cpu().numpy().squeeze()
             gt_depth = gt_depth.cpu().numpy().squeeze()
@@ -231,6 +231,8 @@ def online_eval(model, dataloader_eval, gpu, ngpus):
         eval_measures[:9] += torch.tensor(measures).cuda(device=gpu)
         eval_measures[9] += 1
 
+        # break
+
     if args.multiprocessing_distributed:
         group = dist.new_group([i for i in range(ngpus)])
         dist.all_reduce(tensor=eval_measures, op=dist.ReduceOp.SUM, group=group)
@@ -252,6 +254,12 @@ def online_eval(model, dataloader_eval, gpu, ngpus):
 
 
 def main_worker(gpu, ngpus_per_node, args, args_rest):
+    ## set manual seed to make it reproducible
+    torch.manual_seed(0)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    np.random.seed(0)
+
     args.gpu = gpu
 
     if args.gpu is not None:
@@ -306,7 +314,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     best_eval_steps_dep = np.zeros(9, dtype=np.int32)
 
     # C3D module
-    c3d_model = C3DLoss(args.data_path, batch_size=args.batch_size)
+    c3d_model = C3DLoss(args.data_path, batch_size=args.batch_size, seq_frame_n=args.seq_frame_n)
     c3d_model.parse_opts(args_rest)
     c3d_model.cuda()
 
@@ -399,12 +407,13 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             focal = torch.autograd.Variable(sample_batched['focal'].cuda(args.gpu, non_blocking=True))
             depth_gt = torch.autograd.Variable(sample_batched['depth'].cuda(args.gpu, non_blocking=True))
 
-            lpg8x8, lpg4x4, lpg2x2, reduc1x1, depth_est = model(image, focal)
+            lpg8x8, lpg4x4, lpg2x2, reduc1x1, depth_est, iconv1 = model(image, focal)
 
+            Ts = sample_batched['T'].cuda(args.gpu, non_blocking=True)
             depth_mask = sample_batched['mask'].cuda(args.gpu, non_blocking=True)
             depth_gt_mask = sample_batched['mask_gt'].cuda(args.gpu, non_blocking=True)
             date_side = (sample_batched['date_str'], sample_batched['side'])
-            inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, date_side, xy_crop=sample_batched['xy_crop'] ) 
+            inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, date_side, xy_crop=sample_batched['xy_crop'], Ts=Ts ) 
 
             if args.dataset == 'nyu':
                 mask = depth_gt > 0.1
@@ -418,7 +427,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
             loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
             # loss.backward()
-            loss_total = loss - inp * args.c3d_in_loss_weight
+            loss_total = loss * args.silog_weight - inp * args.c3d_weight
             loss_total.backward()
             for param_group in optimizer.param_groups:
                 current_lr = (args.learning_rate - end_learning_rate) * (1 - global_step / num_total_steps) ** 0.9 + end_learning_rate
@@ -431,9 +440,18 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                     print('[epoch][s/s_per_e/gs]: [{}][{}/{}/{}], lr: {:.12f}, loss: {:.12f}'.format(epoch, step, steps_per_epoch, global_step, current_lr, loss))
                 if np.isnan(loss.cpu().item()):
                     print('NaN in loss occurred. Aborting training.')
+                    print('depth_est[mask].min(), max(): {}, {}'.format(depth_est[mask].min(), depth_est[mask].max() ))
+                    print('depth_gt[mask].min(), max(): {}, {}'.format(depth_gt[mask].min(), depth_gt[mask].max() ))
+                    print('iconv1[mask].min(), max(): {}, {}'.format(iconv1[mask].min(), iconv1[mask].max() ))
+                    print('log(depth_est[mask].min(), max()): {}, {}'.format(torch.log(depth_est[mask]).min(), torch.log(depth_est[mask]).max() ))
+                    print('log(depth_gt[mask].min(), max()): {}, {}'.format(torch.log(depth_gt[mask]).min(), torch.log(depth_gt[mask]).max() ))
+                    print('depth_est.min(), max(): {}, {}'.format(depth_est.min(), depth_est.max() ))
+                    print('depth_gt.min(), max(): {}, {}'.format(depth_gt.min(), depth_gt.max() ))
+                    print('iconv1.min(), max(): {}, {}'.format(iconv1.min(), iconv1.max() ))
                     return -1
 
             duration += time.time() - before_op_time
+            # if True:
             if global_step and ( (global_step % 100 == 0 and global_step < 1000) or global_step % args.log_freq == 0 ) and not model_just_loaded:
                 var_sum = [var.sum() for var in model.parameters() if var.requires_grad]
                 var_cnt = len(var_sum)
@@ -441,6 +459,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                 examples_per_sec = args.batch_size / duration * args.log_freq
                 duration = 0
                 time_sofar = (time.time() - start_time) / 3600
+                # training_time_left = (num_total_steps / (global_step+1) - 1.0) * time_sofar
                 training_time_left = (num_total_steps / global_step - 1.0) * time_sofar
                 if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
                     print("{}".format(args.model_name))
@@ -454,7 +473,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                     writer.add_scalar('var average', var_sum.item()/var_cnt, global_step)
                     writer.add_scalar('c3d inp', inp, global_step) # cvo logging
                     writer.add_scalar('loss_total', loss_total, global_step) # cvo logging
-                    depth_gt = torch.where(depth_gt < 1e-3, depth_gt * 0 + 1e3, depth_gt)
+                    # depth_gt = torch.where(depth_gt < 1e-3, depth_gt * 0 + 1e3, depth_gt)
                     batch_size_cur = depth_gt.shape[0]  # this fixes a bug which may not always occur because it happenss only when the logging iteration (once every args.log_freq) happens to be the last mini-batch in a epoch.
                     for i in range(batch_size_cur):
                         writer.add_image('depth_gt/image/{}'.format(i), vis_depth(depth_gt[i, :, :, :]), global_step)
@@ -467,6 +486,10 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                         writer.add_image('mask/image/{}'.format(i), depth_mask[i, :, :, :].data, global_step)
                         writer.add_image('mask_gt/image/{}'.format(i), depth_gt_mask[i, :, :, :].data, global_step)
                         writer.add_image('mask_ori/image/{}'.format(i), mask[i, :, :, :].data, global_step)
+                        # name_global_step = '{}_{}.jpg'.format(global_step, i)
+                        # name_abs_file = '{}_{}_{}.jpg'.format(sample_batched['date_str'][i], sample_batched['seq'][i], sample_batched['frame'][i])
+                        # img_dep = overlay_dep_on_rgb(vis_depth(depth_gt[i, :, :, :]), inv_normalize(image[i, :, :, :]), 
+                        #             path=os.path.join(args.log_directory, args.model_name, 'img_dep'), name=name_abs_file )
                     writer.flush()
 
             model_just_loaded = False
