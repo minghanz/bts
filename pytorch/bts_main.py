@@ -420,7 +420,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             else:
                 mask = depth_gt > 1.0
 
-            #### can see that the mask_gt is (at least visually) the same as mask generated above.
+            #### can see that the mask_gt is (at least visually) the same as mask generated above. 
             # save_tensor_to_img(depth_mask, os.path.join(args.log_directory, args.model_name, '{}_pred'.format(global_step) ), 'mask')
             # save_tensor_to_img(depth_gt_mask, os.path.join(args.log_directory, args.model_name, '{}_gt'.format(global_step) ), 'mask')
             # save_tensor_to_img(mask, os.path.join(args.log_directory, args.model_name, '{}_ori'.format(global_step) ), 'mask')
