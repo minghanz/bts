@@ -37,12 +37,16 @@ from tqdm import tqdm
 from bts import BtsModel
 from bts_dataloader import *
 
-from c3d_loss import C3DLoss
 from bts_main_argparse import parse_args_main
 
 script_path = os.path.dirname(__file__)
-sys.path.append(os.path.join(script_path, "../../monodepth2"))
-from cvo_utils import save_tensor_to_img
+# from c3d_loss import C3DLoss
+# sys.path.append(os.path.join(script_path, "../../monodepth2"))
+# from cvo_utils import save_tensor_to_img
+
+sys.path.append(os.path.join(script_path, "../../c3d"))
+from c3d_loss import C3DLoss
+from utils.io import save_tensor_to_img
 
 from bts_utils import vis_depth, overlay_dep_on_rgb
 
@@ -56,7 +60,9 @@ if args.mode == 'train' and not args.checkpoint_path:
 
 elif args.mode == 'train' and args.checkpoint_path:
     model_dir = os.path.dirname(args.checkpoint_path)
-    model_name = os.path.basename(model_dir)
+    # model_name = os.path.basename(model_dir)
+    model_name = 'bts'
+    
     import sys
     sys.path.append(model_dir)
     for key, val in vars(__import__(model_name)).items():
@@ -426,6 +432,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             # save_tensor_to_img(mask, os.path.join(args.log_directory, args.model_name, '{}_ori'.format(global_step) ), 'mask')
 
             loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
+            # loss = silog_criterion.forward(depth_est, depth_gt, depth_gt_mask)
             # loss.backward()
             loss_total = loss * args.silog_weight - inp * args.c3d_weight
             loss_total.backward()

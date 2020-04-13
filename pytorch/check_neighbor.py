@@ -123,36 +123,37 @@ def write_file_from_file(frames, lineseq, ori_file, out_file):
             for i in lineseq[date_seq]:
                 f.write(ori_lines[i])
 
-mode = 'monodepth2' #'monodepth2' 'bts'
+if __name__ == "__main__":
+    mode = 'monodepth2' #'monodepth2' 'bts'
 
-train_file = {}
-val_file = {}
-test_file = {}
-train_file['bts'] = '/root/repos/bts/train_test_inputs/eigen_train_files_with_gt_jpg_fullpath.txt'
-test_file['bts'] = '/root/repos/bts/train_test_inputs/eigen_test_files_with_gt_jpg_fullpath.txt'
-train_file['monodepth2'] = '/root/repos/monodepth2/splits/eigen_zhou_w_dense/train_files.txt'
-val_file['monodepth2'] = '/root/repos/monodepth2/splits/eigen_zhou_w_dense/val_files.txt'
-test_file['monodepth2'] = '/root/repos/monodepth2/splits/eigen_benchmark/test_files.txt'
-
-
-train_bts_frames, train_bts_lineseq = file2frames(train_file['bts'], 'bts')
-
-train_mn2_frames, train_mn2_lineseq = file2frames(train_file['monodepth2'], 'monodepth2')
-
-val_mn2_frames, val_mn2_lineseq = file2frames(val_file['monodepth2'], 'monodepth2')
+    train_file = {}
+    val_file = {}
+    test_file = {}
+    train_file['bts'] = '/root/repos/bts/train_test_inputs/eigen_train_files_with_gt_jpg_fullpath.txt'
+    test_file['bts'] = '/root/repos/bts/train_test_inputs/eigen_test_files_with_gt_jpg_fullpath.txt'
+    train_file['monodepth2'] = '/root/repos/monodepth2/splits/eigen_zhou_w_dense/train_files.txt'
+    val_file['monodepth2'] = '/root/repos/monodepth2/splits/eigen_zhou_w_dense/val_files.txt'
+    test_file['monodepth2'] = '/root/repos/monodepth2/splits/eigen_benchmark/test_files.txt'
 
 
-# dup = check_dup(train_frames, test_frames )
-# print(len(dup))
+    train_bts_frames, train_bts_lineseq = file2frames(train_file['bts'], 'bts')
 
-# check_ctn_and_sort(train_frames, train_lineseq)
+    train_mn2_frames, train_mn2_lineseq = file2frames(train_file['monodepth2'], 'monodepth2')
 
-frames_itc = {}
-lineseq_itc = {}
-take_intersection(frames_itc, lineseq_itc, train_bts_frames, train_bts_lineseq, train_mn2_frames, train_mn2_lineseq)
-take_intersection(frames_itc, lineseq_itc, train_bts_frames, train_bts_lineseq, val_mn2_frames, val_mn2_lineseq)
+    val_mn2_frames, val_mn2_lineseq = file2frames(val_file['monodepth2'], 'monodepth2')
 
-check_ctn_and_sort(frames_itc, lineseq_itc)
 
-out_file = '/root/repos/bts/train_test_inputs/eigen_train_files_with_gt_nonstatic_jpg_fullpath.txt'
-write_file_from_file(frames_itc, lineseq_itc, train_file['bts'], out_file)
+    # dup = check_dup(train_frames, test_frames )
+    # print(len(dup))
+
+    # check_ctn_and_sort(train_frames, train_lineseq)
+
+    frames_itc = {}
+    lineseq_itc = {}
+    take_intersection(frames_itc, lineseq_itc, train_bts_frames, train_bts_lineseq, train_mn2_frames, train_mn2_lineseq)
+    take_intersection(frames_itc, lineseq_itc, train_bts_frames, train_bts_lineseq, val_mn2_frames, val_mn2_lineseq)
+
+    check_ctn_and_sort(frames_itc, lineseq_itc)
+
+    out_file = '/root/repos/bts/train_test_inputs/eigen_train_files_with_gt_nonstatic_jpg_fullpath.txt'
+    write_file_from_file(frames_itc, lineseq_itc, train_file['bts'], out_file)
