@@ -44,9 +44,10 @@ script_path = os.path.dirname(__file__)
 # sys.path.append(os.path.join(script_path, "../../monodepth2"))
 # from cvo_utils import save_tensor_to_img
 
-sys.path.append(os.path.join(script_path, "../../c3d"))
-from c3d_loss import C3DLoss
-from utils.io import save_tensor_to_img
+sys.path.append(os.path.join(script_path, "../../"))
+from c3d.c3d_loss import C3DLoss
+from c3d.pho_loss import PhoLoss
+from c3d.utils.io import save_tensor_to_img
 
 from bts_utils import vis_depth, overlay_dep_on_rgb
 
@@ -323,6 +324,10 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     c3d_model = C3DLoss(args.data_path, batch_size=args.batch_size, seq_frame_n=args.seq_frame_n)
     c3d_model.parse_opts(args_rest)
     c3d_model.cuda()
+    
+    # pho loss
+    pho_model = PhoLoss(args.data_path, batch_size=args.batch_size, seq_frame_n=args.seq_frame_n)
+    pho_model.cuda()
 
     # Training parameters
     optimizer = torch.optim.AdamW([{'params': model.module.encoder.parameters(), 'weight_decay': args.weight_decay},
@@ -421,6 +426,9 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             date_side = (sample_batched['date_str'], sample_batched['side'])
             inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, date_side, xy_crop=sample_batched['xy_crop'], Ts=Ts ) 
 
+            image_ori = sample_batched['image_ori'].cuda(args.gpu, non_blocking=True)
+            rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, date_side=date_side, xy_crop=sample_batched['xy_crop'])
+
             if args.dataset == 'nyu':
                 mask = depth_gt > 0.1
             else:
@@ -434,7 +442,15 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
             # loss = silog_criterion.forward(depth_est, depth_gt, depth_gt_mask)
             # loss.backward()
-            loss_total = loss * args.silog_weight - inp * args.c3d_weight
+            if args.turn_off_dloss <= 0:
+                loss_total = loss * args.silog_weight - inp * args.c3d_weight + pho_loss * args.pho_weight
+            elif epoch < args.turn_off_dloss:
+                loss_total = loss * args.silog_weight - inp * args.c3d_weight + pho_loss * args.pho_weight
+            else:
+                loss_total = - inp * args.c3d_weight * 10 + pho_loss * args.pho_weight
+                
+            # print(inp, pho_loss, loss) # 2000, 0.3, 3
+
             loss_total.backward()
             for param_group in optimizer.param_groups:
                 current_lr = (args.learning_rate - end_learning_rate) * (1 - global_step / num_total_steps) ** 0.9 + end_learning_rate
@@ -480,6 +496,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                     writer.add_scalar('var average', var_sum.item()/var_cnt, global_step)
                     writer.add_scalar('c3d inp', inp, global_step) # cvo logging
                     writer.add_scalar('loss_total', loss_total, global_step) # cvo logging
+                    writer.add_scalar('pho_loss', pho_loss, global_step) # cvo logging
                     # depth_gt = torch.where(depth_gt < 1e-3, depth_gt * 0 + 1e3, depth_gt)
                     batch_size_cur = depth_gt.shape[0]  # this fixes a bug which may not always occur because it happenss only when the logging iteration (once every args.log_freq) happens to be the last mini-batch in a epoch.
                     for i in range(batch_size_cur):
@@ -497,6 +514,12 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                         # name_abs_file = '{}_{}_{}.jpg'.format(sample_batched['date_str'][i], sample_batched['seq'][i], sample_batched['frame'][i])
                         # img_dep = overlay_dep_on_rgb(vis_depth(depth_gt[i, :, :, :]), inv_normalize(image[i, :, :, :]), 
                         #             path=os.path.join(args.log_directory, args.model_name, 'img_dep'), name=name_abs_file )
+                        writer.add_image('image_ori/image/{}'.format(i), image_ori[i, :, :, :], global_step)
+                    for i in range(len(rgb_preds)):
+                        target_id = i // 2 + 1
+                        offset = -1 if i % 2 == 0 else 1
+                        writer.add_image('image_recst/image/{}_from_{}'.format(target_id, target_id+offset), rgb_preds[i][0], global_step)
+                        
                     writer.flush()
 
             model_just_loaded = False

@@ -4,7 +4,7 @@ from torch.utils.data.sampler import Sampler, SubsetRandomSampler
 import random
 from torch._six import container_abcs, string_classes, int_classes
 
-def random_crop_tensor(img, depth, mask, mask_gt, height, width, batched):
+def random_crop_tensor(img, depth, mask, mask_gt, image_ori, height, width, batched):
     if batched:
         h, w = 2, 3
     else:
@@ -20,7 +20,8 @@ def random_crop_tensor(img, depth, mask, mask_gt, height, width, batched):
     depth = depth[..., y:y + height, x:x + width]
     mask = mask[..., y:y + height, x:x + width]
     mask_gt = mask_gt[..., y:y + height, x:x + width]
-    return img, depth, mask, mask_gt, x, y
+    image_ori = image_ori[..., y:y + height, x:x + width]
+    return img, depth, mask, mask_gt, image_ori, x, y
 
 
 class Collate_Cfg:
@@ -72,20 +73,22 @@ class Collate_Cfg:
             depth = torch.stack([batchi['depth'] for batchi in batch], 0)
             mask = torch.stack([batchi['mask'] for batchi in batch], 0)
             mask_gt = torch.stack([batchi['mask_gt'] for batchi in batch], 0)
+            image_ori = torch.stack([batchi['image_ori'] for batchi in batch], 0)
             
-            image, depth, mask, mask_gt, w_start, h_start = random_crop_tensor(image, depth, mask, mask_gt, self.net_input_height, self.net_input_width, batched=True)
+            image, depth, mask, mask_gt, image_ori, w_start, h_start = random_crop_tensor(image, depth, mask, mask_gt, image_ori, self.net_input_height, self.net_input_width, batched=True)
 
             new_batch['image'] = image
             new_batch['depth'] = depth
             new_batch['mask'] = mask
             new_batch['mask_gt'] = mask_gt
+            new_batch['image_ori'] = image_ori
 
             for batchi in batch:
                 (x_start, y_start, x_size, y_size) = batchi['xy_crop']
                 batchi['xy_crop'] = (x_start + w_start, y_start + h_start, self.net_input_width, self.net_input_height)
 
             for key in elem:
-                if key not in ['image', 'depth', 'mask', 'mask_gt']:
+                if key not in ['image', 'depth', 'mask', 'mask_gt', 'image_ori']:
                     new_batch[key] = self.collate_common_crop([d[key] for d in batch])
 
             return new_batch

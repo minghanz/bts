@@ -120,26 +120,27 @@ class DataLoadPreprocess(Dataset):
         #     assert date in dates
         #     self.lines_in_date[date].append(i)
 
-        ## process lines and retrive date, seq, side and frame
-        self.line_idx = {}
-        self.frame_idx = {}
-        for i, line in enumerate(self.filenames):
-            date, seq, side, frame = process_line(line)
-            if date not in self.line_idx:
-                self.line_idx[date] = {}
-                self.frame_idx[date] = {}
-            if (seq, side) not in self.line_idx[date]:
-                self.line_idx[date][(seq, side)] = []
-                self.frame_idx[date][(seq, side)] = []
-            self.line_idx[date][(seq, side)].append(i)
-            self.frame_idx[date][(seq, side)].append(frame)
+        if mode =='train':
+            ## process lines and retrive date, seq, side and frame
+            self.line_idx = {}
+            self.frame_idx = {}
+            for i, line in enumerate(self.filenames):
+                date, seq, side, frame = process_line(line)
+                if date not in self.line_idx:
+                    self.line_idx[date] = {}
+                    self.frame_idx[date] = {}
+                if (seq, side) not in self.line_idx[date]:
+                    self.line_idx[date][(seq, side)] = []
+                    self.frame_idx[date][(seq, side)] = []
+                self.line_idx[date][(seq, side)].append(i)
+                self.frame_idx[date][(seq, side)].append(frame)
 
-        ### generate both-direction mapping
-        self.frame2line, self.line2frame = frame_line_mapping(self.frame_idx, self.line_idx)
+            ### generate both-direction mapping
+            self.frame2line, self.line2frame = frame_line_mapping(self.frame_idx, self.line_idx)
 
-        ### for each (date, seq, side), get sample points, which should be sampled from
-        frame_idxs_to_sample, line_idx_to_sample = samp_from_seq(self.frame_idx, self.line_idx, args.seq_frame_n)
-        self.lines_group = gen_samp_list(line_idx_to_sample, use_date_key=args.batch_same_intr) #every mini-batch should be sampled from the same group
+            ### for each (date, seq, side), get sample points, which should be sampled from
+            frame_idxs_to_sample, line_idx_to_sample = samp_from_seq(self.frame_idx, self.line_idx, args.seq_frame_n)
+            self.lines_group = gen_samp_list(line_idx_to_sample, use_date_key=args.batch_same_intr) #every mini-batch should be sampled from the same group
 
 
         self.K_dict = preload_K(args.data_path)
@@ -244,7 +245,8 @@ class DataLoadPreprocess(Dataset):
             # xy_crop = (x_start, y_start, x_size, y_size)
 
             ## random flip, gamma, brightness, color augmentation
-            image, depth_gt, mask, mask_gt = self.train_preprocess(image, depth_gt, mask, mask_gt)
+            ## Minghan: random flip disabled
+            image_aug, depth_gt, mask, mask_gt = self.train_preprocess(image, depth_gt, mask, mask_gt)
 
             ## get global pose of the camera
             pose_file = os.path.join(self.args.data_path, date_str, seq_str, 'poses', 'cam_{:02d}.txt'.format(side))
@@ -254,7 +256,7 @@ class DataLoadPreprocess(Dataset):
             T = np.vstack( (T, np.array([[0,0,0,1]]))).astype(np.float32)
 
             # sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop}
-            sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T}
+            sample = {'image': image_aug, 'image_ori':image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T}
         
         else:
             if self.mode == 'online_eval':
@@ -442,8 +444,10 @@ class ToTensor(object):
             depth = self.to_tensor(depth)
             mask = self.to_tensor(mask)
             mask_gt = self.to_tensor(mask_gt)
+
+            image_ori = self.to_tensor(sample['image_ori'])
             
-            return {'image': image, 'depth': depth, 'focal': focal, 
+            return {'image': image, 'depth': depth, 'focal': focal, 'image_ori': image_ori,
                     'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop'], 'seq': sample['seq'], 'frame': sample['frame'], 'T': T}
         else:
             has_valid_depth = sample['has_valid_depth']

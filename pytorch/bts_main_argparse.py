@@ -51,8 +51,10 @@ def parse_args_main():
     parser.add_argument('--variance_focus',            type=float, help='lambda in paper: [0, 1], higher value more focus on minimizing variance of error', default=0.85)
     parser.add_argument('--c3d_weight',                type=float, help='weight for continuous 3D loss in back proped in training') # add by Minghan
     parser.add_argument('--silog_weight',              type=float, help='weight for si_log loss in back proped in training') # add by Minghan
+    parser.add_argument('--pho_weight',                type=float, help='weight for photometric loss in back proped in training') # add by Minghan
     parser.add_argument("--seq_frame_n",               type=int,   help="neighbor range when calculating normal direction on sparse point cloud", default=1 )
     parser.add_argument("--batch_same_intr",                       help="neighbor range when calculating normal direction on sparse point cloud", action='store_true' )
+    parser.add_argument("--turn_off_dloss",            type=int,   help="turn off depth loss after how many epochs to alleviate problem at edges, -1 to never disable depth loss", default=-1 )
     
 
     # Preprocessing
