@@ -48,8 +48,9 @@ sys.path.append(os.path.join(script_path, "../../"))
 from c3d.c3d_loss import C3DLoss
 from c3d.pho_loss import PhoLoss
 from c3d.utils.io import save_tensor_to_img
+from c3d.utils.vis import vis_normal, vis_depth, overlay_dep_on_rgb
 
-from bts_utils import vis_depth, overlay_dep_on_rgb
+# from bts_utils import vis_depth, overlay_dep_on_rgb
 
 if sys.argv.__len__() == 2:
     args, args_rest = parse_args_main()
@@ -426,21 +427,25 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             date_side = (sample_batched['date_str'], sample_batched['side'])
             inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, date_side, xy_crop=sample_batched['xy_crop'], Ts=Ts ) 
 
+            # normal_gt, normal_est = c3d_model.get_normal_feature()
+            # normal_gt_vis = vis_normal(normal_gt)
+            # normal_est_vis = vis_normal(normal_est)
+
             image_ori = sample_batched['image_ori'].cuda(args.gpu, non_blocking=True)
             rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, date_side=date_side, xy_crop=sample_batched['xy_crop'])
 
-            if args.dataset == 'nyu':
-                mask = depth_gt > 0.1
-            else:
-                mask = depth_gt > 1.0
+            # if args.dataset == 'nyu':
+            #     mask = depth_gt > 0.1
+            # else:
+            #     mask = depth_gt > 1.0
 
             #### can see that the mask_gt is (at least visually) the same as mask generated above. 
             # save_tensor_to_img(depth_mask, os.path.join(args.log_directory, args.model_name, '{}_pred'.format(global_step) ), 'mask')
             # save_tensor_to_img(depth_gt_mask, os.path.join(args.log_directory, args.model_name, '{}_gt'.format(global_step) ), 'mask')
             # save_tensor_to_img(mask, os.path.join(args.log_directory, args.model_name, '{}_ori'.format(global_step) ), 'mask')
 
-            loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
-            # loss = silog_criterion.forward(depth_est, depth_gt, depth_gt_mask)
+            # loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
+            loss = silog_criterion.forward(depth_est, depth_gt, depth_gt_mask)
             # loss.backward()
             if args.turn_off_dloss <= 0:
                 loss_total = loss * args.silog_weight - inp * args.c3d_weight + pho_loss * args.pho_weight
@@ -459,10 +464,11 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             optimizer.step()
 
             if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
-                if global_step % 100 == 0 :
+                if global_step % args.print_freq == 0 :
                     print('[epoch][s/s_per_e/gs]: [{}][{}/{}/{}], lr: {:.12f}, loss: {:.12f}'.format(epoch, step, steps_per_epoch, global_step, current_lr, loss))
                 if np.isnan(loss.cpu().item()):
                     print('NaN in loss occurred. Aborting training.')
+                    mask = depth_gt_mask
                     print('depth_est[mask].min(), max(): {}, {}'.format(depth_est[mask].min(), depth_est[mask].max() ))
                     print('depth_gt[mask].min(), max(): {}, {}'.format(depth_gt[mask].min(), depth_gt[mask].max() ))
                     print('iconv1[mask].min(), max(): {}, {}'.format(iconv1[mask].min(), iconv1[mask].max() ))
@@ -475,11 +481,12 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
             duration += time.time() - before_op_time
             # if True:
-            if global_step and ( (global_step % 100 == 0 and global_step < 1000) or global_step % args.log_freq == 0 ) and not model_just_loaded:
+            log_freq_cur = args.log_freq_ini if global_step <= 1000 else args.log_freq
+            if global_step and global_step % log_freq_cur == 0 and not model_just_loaded:
                 var_sum = [var.sum() for var in model.parameters() if var.requires_grad]
                 var_cnt = len(var_sum)
                 var_sum = np.sum(var_sum)
-                examples_per_sec = args.batch_size / duration * args.log_freq
+                examples_per_sec = args.batch_size / duration * log_freq_cur
                 duration = 0
                 time_sofar = (time.time() - start_time) / 3600
                 # training_time_left = (num_total_steps / (global_step+1) - 1.0) * time_sofar
@@ -509,12 +516,17 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                         writer.add_image('image/image/{}'.format(i), inv_normalize(image[i, :, :, :]).data, global_step)
                         writer.add_image('mask/image/{}'.format(i), depth_mask[i, :, :, :].data, global_step)
                         writer.add_image('mask_gt/image/{}'.format(i), depth_gt_mask[i, :, :, :].data, global_step)
-                        writer.add_image('mask_ori/image/{}'.format(i), mask[i, :, :, :].data, global_step)
+                        # writer.add_image('mask_ori/image/{}'.format(i), mask[i, :, :, :].data, global_step)
+
+                        # writer.add_image('normal_est/image/{}'.format(i), normal_est_vis[i, :, :, :], global_step)
+                        # writer.add_image('normal_gt/image/{}'.format(i), normal_gt_vis[i, :, :, :], global_step)
+
                         # name_global_step = '{}_{}.jpg'.format(global_step, i)
                         # name_abs_file = '{}_{}_{}.jpg'.format(sample_batched['date_str'][i], sample_batched['seq'][i], sample_batched['frame'][i])
                         # img_dep = overlay_dep_on_rgb(vis_depth(depth_gt[i, :, :, :]), inv_normalize(image[i, :, :, :]), 
                         #             path=os.path.join(args.log_directory, args.model_name, 'img_dep'), name=name_abs_file )
-                        writer.add_image('image_ori/image/{}'.format(i), image_ori[i, :, :, :], global_step)
+
+                        # writer.add_image('image_ori/image/{}'.format(i), image_ori[i, :, :, :], global_step)
                     for i in range(len(rgb_preds)):
                         target_id = i // 2 + 1
                         offset = -1 if i % 2 == 0 else 1
@@ -525,6 +537,14 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             model_just_loaded = False
             global_step += 1
 
+        # ## test time consumption
+        #     if global_step == 5:
+        #         mid_time = time.time() - start_time
+        #     if global_step ==10:
+        #         total_time = time.time() - start_time
+        #         print(mid_time, total_time - mid_time, total_time)
+        #         break
+        # break
         
         ## Minghan: If not do_online_eval, models are saved per save_freq
         # if not args.do_online_eval and global_step and global_step % args.save_freq == 0:

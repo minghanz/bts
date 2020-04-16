@@ -112,6 +112,8 @@ def check_need_to_sample(frame, frame_idxs, frame_idxs_to_sample, seq_frame_n):
     return need
 
 def samp_from_seq(frame_idxs, line_idxs, seq_frame_n):
+    '''Samp once every seq_frame_n frames in a date-seq-side sequence
+    '''
     line_idx_to_sample = {}
     frame_idxs_to_sample = {}
 
@@ -133,6 +135,8 @@ def samp_from_seq(frame_idxs, line_idxs, seq_frame_n):
     return frame_idxs_to_sample, line_idx_to_sample
 
 def gen_samp_list(line_idx_to_sample, use_date_key):
+    '''Construct line groups from line_idx_to_sample dict
+    '''
     lines = {}
     
     for date in line_idx_to_sample:

@@ -35,6 +35,8 @@ def parse_args_main():
     parser.add_argument('--checkpoint_path',           type=str,   help='path to a checkpoint to load', default='')
     parser.add_argument('--log_freq',                  type=int,   help='Logging frequency in global steps', default=100)
     parser.add_argument('--save_freq',                 type=int,   help='Checkpoint saving frequency in global steps', default=500)
+    parser.add_argument('--log_freq_ini',              type=int,   help='Logging frequency in global steps in first 1000 iters', default=100)
+    parser.add_argument('--print_freq',                type=int,   help='Printing frequency in global steps', default=100)
 
     # Training
     parser.add_argument('--fix_first_conv_blocks',                 help='if set, will fix the first two conv blocks', action='store_true')

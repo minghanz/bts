@@ -22,7 +22,10 @@ def read_img(root, date, seq, idx, new_shape=None):
     img_np = np.array(image)
     return img_np
 
-def lidar2img(root, date, seq, idx, new_shape=None):
+def lidar2img(root, date, seq, idx, new_shape=None, align_corner=True):
+    '''
+    align_corner: if true, edge pixel center is aligned, otherwise edge pixel corner is aligned. In both cases pixel coordinate is integer at pixel center. 
+    '''
     calib_cam_path = os.path.join(root, date, 'calib_cam_to_cam.txt')
     calib_lid_path = os.path.join(root, date, 'calib_velo_to_cam.txt')
     img_path = os.path.join(root, date, seq_folder.format(date, seq), 'image_02', 'data', '{:010d}.jpg'.format(idx))
@@ -36,14 +39,6 @@ def lidar2img(root, date, seq, idx, new_shape=None):
 
     ## get K
     P_rect_02 = intr['P_rect_02'].reshape(3,4)
-    K = P_rect_02[:, :3]
-
-    ## get translation from 0 to 2
-    Kt = P_rect_02[:, [3]]
-    K_inv = np.linalg.inv(K)
-    t = np.dot(K_inv, Kt)
-    P_rect_t = np.identity(4)
-    P_rect_t[:3, [3]] = t
 
     ## get rotation for rectification
     R_rect_00 = intr['R_rect_00'].reshape(3, 3)
@@ -59,9 +54,32 @@ def lidar2img(root, date, seq, idx, new_shape=None):
         P_cam_lidar = np.matmul(P_rect_02, np.matmul(T_rect_00, T_cam_lidar))
         im_shape = S_02
     else:
+        ## get K
+        K = P_rect_02[:, :3]
+        K[0, 2] -= 1    ## to be aligned with matlab implementation
+        K[1, 2] -= 1
+
+        ## get translation from 0 to 2
+        Kt = P_rect_02[:, [3]]
+        K_inv = np.linalg.inv(K)
+        t = np.dot(K_inv, Kt)
+        P_rect_t = np.identity(4)
+        P_rect_t[:3, [3]] = t
+
+        ## get K for scaled image
         K_new = K.copy()
-        K_new[0] = K[0] / S_02[1] * new_shape[1]
-        K_new[1] = K[1] / S_02[0] * new_shape[0]
+        # K_new[0] = K[0] / S_02[1] * new_shape[1]
+        # K_new[1] = K[1] / S_02[0] * new_shape[0]
+        scale_w = (new_shape[1] - 1) / (S_02[1] - 1) if align_corner else new_shape[1] / S_02[1]
+        scale_h = (new_shape[0] - 1) / (S_02[0] - 1) if align_corner else new_shape[0] / S_02[0]
+        K_new[0, 0] = K[0, 0] * scale_w
+        K_new[1, 1] = K[1, 1] * scale_h
+        if align_corner:
+            K_new[0, 2] = K[0, 2] * scale_w
+            K_new[1, 2] = K[1, 2] * scale_h
+        else:
+            K_new[0, 2] = (K[0, 2] + 0.5) * scale_w - 0.5
+            K_new[1, 2] = (K[1, 2] + 0.5) * scale_h - 0.5
         K_new = np.hstack( (K_new, np.array([0,0,0]).reshape(3,1)) )
         P_cam_lidar = np.matmul(np.matmul(K_new, P_rect_t), np.matmul(T_rect_00, T_cam_lidar))
         im_shape = new_shape
@@ -70,13 +88,15 @@ def lidar2img(root, date, seq, idx, new_shape=None):
     pts_lidar = load_velodyne_points(lid_path)
     pts_lidar = pts_lidar[pts_lidar[:, 0] >= 0, :]
 
-    ## project to image (-1 to be consistent with matlab result)
+    ## project to image (-1 to be consistent with matlab result, not by preprocessing the intrinsic K)
     lidar_prj = np.matmul(P_cam_lidar, pts_lidar.T)
     lidar_prj[:2] = lidar_prj[:2] / lidar_prj[[2]]
-    lidar_prj[:2] = np.round(lidar_prj[:2]) - 1
+    lidar_prj[:2] = np.round(lidar_prj[:2])
+    if new_shape is None:
+        lidar_prj[:2] = lidar_prj[:2] - 1 # when directly using P_rect_02, -1 is not adjusted yet
 
     ## crop out-of-sight points
-    valid_idx = ( lidar_prj[0] >= 0 ) & ( lidar_prj[0] < im_shape[1] ) & ( lidar_prj[1] >= 0 ) & ( lidar_prj[1] < im_shape[0] )
+    valid_idx = ( lidar_prj[0] > -0.5 ) & ( lidar_prj[0] < im_shape[1]-0.5 ) & ( lidar_prj[1] > -0.5 ) & ( lidar_prj[1] < im_shape[0]-0.5 )
     lidar_prj = lidar_prj[:, valid_idx]
 
     ## compose depth image

@@ -28,7 +28,13 @@ from distributed_sampler_no_evenly_divisible import *
 import cv2
 from skimage.morphology import binary_dilation, binary_closing
 from sampler_kitti import SamplerKITTI, Collate_Cfg, samp_from_seq, gen_samp_list, frame_line_mapping
-from bts_pre_intr import preload_K, load_velodyne_points, lidar_to_depth
+# from bts_pre_intr import preload_K, load_velodyne_points, lidar_to_depth
+import sys
+script_path = os.path.dirname(__file__)
+sys.path.append(os.path.join(script_path, "../../"))
+from c3d.utils.dataset_kitti import preload_K, load_velodyne_points
+from c3d.utils.cam import lidar_to_depth
+
 import re
 
 from check_neighbor import process_line
