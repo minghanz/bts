@@ -83,12 +83,17 @@ class Collate_Cfg:
             new_batch['mask_gt'] = mask_gt
             new_batch['image_ori'] = image_ori
 
+            if 'image_side' in elem: ## 'off_side' does not need separate processing
+                # new_batch['image_side'] = [ [ imagej[...,h_start:h_start + height, w_start:w_start + width] for imagej in batchi['image_side']] for batchi in batch]
+                new_batch['image_side'] = torch.stack([batchi['image_side'] for batchi in batch], 0)
+                new_batch['T_side'] = torch.stack([batchi['T_side'] for batchi in batch], 0)
+
             for batchi in batch:
                 (x_start, y_start, x_size, y_size) = batchi['xy_crop']
                 batchi['xy_crop'] = (x_start + w_start, y_start + h_start, self.net_input_width, self.net_input_height)
 
             for key in elem:
-                if key not in ['image', 'depth', 'mask', 'mask_gt', 'image_ori']:
+                if key not in ['image', 'depth', 'mask', 'mask_gt', 'image_ori', 'image_side', 'T_side']:
                     new_batch[key] = self.collate_common_crop([d[key] for d in batch])
 
             return new_batch
@@ -101,6 +106,15 @@ class Collate_Cfg:
 
         raise TypeError(self.default_collate_err_msg_format.format(elem_type))
 
+def check_neighbor_exist(frame, frame_idxs, seq_frame_n):
+    follow = (seq_frame_n - 1) // 2
+    front = seq_frame_n - 1 - follow
+    need = True
+    for i in range(1, follow+1):
+        need = need and frame+i in frame_idxs
+    for i in range(1, front+1):
+        need = need and frame-i in frame_idxs
+    return need
 
 def check_need_to_sample(frame, frame_idxs, frame_idxs_to_sample, seq_frame_n):
     need = True
@@ -111,7 +125,7 @@ def check_need_to_sample(frame, frame_idxs, frame_idxs_to_sample, seq_frame_n):
         
     return need
 
-def samp_from_seq(frame_idxs, line_idxs, seq_frame_n):
+def samp_from_seq(frame_idxs, line_idxs, seq_frame_n, seq_aside):
     '''Samp once every seq_frame_n frames in a date-seq-side sequence
     '''
     line_idx_to_sample = {}
@@ -128,7 +142,9 @@ def samp_from_seq(frame_idxs, line_idxs, seq_frame_n):
             frame_idxs_to_sample[date][seq_side] = []
 
             for i, frame in enumerate(frame_idxs[date][seq_side]):
-                if check_need_to_sample(frame, frame_idxs[date][seq_side], frame_idxs_to_sample[date][seq_side], seq_frame_n):
+                condition = check_neighbor_exist(frame, frame_idxs[date][seq_side], seq_frame_n) if seq_aside \
+                            else check_need_to_sample(frame, frame_idxs[date][seq_side], frame_idxs_to_sample[date][seq_side], seq_frame_n)
+                if condition:
                     frame_idxs_to_sample[date][seq_side].append(frame)
                     line_idx_to_sample[date][seq_side].append(line_idxs[date][seq_side][i])
 
@@ -164,12 +180,13 @@ def frame_line_mapping(frame_idxs, line_idxs):
 class SamplerKITTI(Sampler):
     """Every sampled mini-batch are from the same date so that they can share the same uvb_flat and xy1_flat in C3DLoss
     """
-    def __init__(self, dataset, batch_size, seq_frame_n, drop_last=False ): 
+    def __init__(self, dataset, batch_size, seq_frame_n, seq_aside, drop_last=False ): 
         # drop_last default to False according to https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader
         self.dataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
         self.seq_frame_n = seq_frame_n
+        self.seq_aside = seq_aside
 
         if not isinstance(batch_size, int_classes) or isinstance(batch_size, bool) or \
                 batch_size <= 0:
@@ -209,17 +226,19 @@ class SamplerKITTI(Sampler):
                 try:
                     idx = next(sub_iters[key])
                     date, seq_side, frame = self.dataset.line2frame[idx]
-                    idx_next = []
-                    for i in range(1, self.seq_frame_n):
-                        idx_next.append(self.dataset.frame2line[(date, seq_side, frame+i)])
+                    if not self.seq_aside:
+                        idx_next = []
+                        for i in range(1, self.seq_frame_n):
+                            idx_next.append(self.dataset.frame2line[(date, seq_side, frame+i)])
 
                 except StopIteration:
                     end_reached[key] = True
                     break
                 else:
                     batch.append(idx)
-                    for idx_new in idx_next:
-                        batch.append(idx_new)
+                    if not self.seq_aside:
+                        for idx_new in idx_next:
+                            batch.append(idx_new)
 
                     if len(batch) == self.batch_size:
                         yield batch
@@ -231,6 +250,12 @@ class SamplerKITTI(Sampler):
 
     def __len__(self):
         if self.drop_last:
-            return sum( sub_size * self.seq_frame_n // self.batch_size for sub_size in self.sub_sizes.values() )
+            if self.seq_aside:
+                return sum( sub_size // self.batch_size for sub_size in self.sub_sizes.values() )
+            else:
+                return sum( sub_size * self.seq_frame_n // self.batch_size for sub_size in self.sub_sizes.values() )
         else:
-            return sum( (sub_size * self.seq_frame_n + self.batch_size-1) // self.batch_size for sub_size in self.sub_sizes.values() )
+            if self.seq_aside: 
+                return sum( (sub_size + self.batch_size-1) // self.batch_size for sub_size in self.sub_sizes.values() )
+            else:
+                return sum( (sub_size * self.seq_frame_n + self.batch_size-1) // self.batch_size for sub_size in self.sub_sizes.values() )

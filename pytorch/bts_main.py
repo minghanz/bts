@@ -49,6 +49,7 @@ from c3d.c3d_loss import C3DLoss
 from c3d.pho_loss import PhoLoss
 from c3d.utils.io import save_tensor_to_img
 from c3d.utils.vis import vis_normal, vis_depth, overlay_dep_on_rgb
+from c3d.utils.timing import Timing
 
 # from bts_utils import vis_depth, overlay_dep_on_rgb
 
@@ -407,11 +408,26 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     num_total_steps = args.num_epochs * steps_per_epoch
     epoch = global_step // steps_per_epoch
 
+    if args.eval_time:
+        timer = Timing()
+        if args.gpu_sync:
+            timer.log_temp('sync')
+            torch.cuda.synchronize()
+            timer.log_temp_end('sync')
+        timer.log('start_of_epoch_loop', 0)
+
     while epoch < args.num_epochs:
         if args.distributed:
             dataloader.train_sampler.set_epoch(epoch)
 
         for step, sample_batched in enumerate(dataloader.data):
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('start_of_batch_iter', 1)
+
             optimizer.zero_grad()
             before_op_time = time.time()
 
@@ -421,19 +437,54 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
             lpg8x8, lpg4x4, lpg2x2, reduc1x1, depth_est, iconv1 = model(image, focal)
 
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_model', 3)
+
             Ts = sample_batched['T'].cuda(args.gpu, non_blocking=True)
             depth_mask = sample_batched['mask'].cuda(args.gpu, non_blocking=True)
             depth_gt_mask = sample_batched['mask_gt'].cuda(args.gpu, non_blocking=True)
             date_side = (sample_batched['date_str'], sample_batched['side'])
             inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, date_side, xy_crop=sample_batched['xy_crop'], Ts=Ts ) 
 
-            # normal_gt, normal_est = c3d_model.get_normal_feature()
-            # normal_gt_vis = vis_normal(normal_gt)
-            # normal_est_vis = vis_normal(normal_est)
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_inp', 3)
 
-            image_ori = sample_batched['image_ori'].cuda(args.gpu, non_blocking=True)
-            rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, date_side=date_side, xy_crop=sample_batched['xy_crop'])
+            normal_gt, normal_est = c3d_model.get_normal_feature()
+            normal_gt_vis = vis_normal(normal_gt)
+            normal_est_vis = vis_normal(normal_est)
 
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_vis_normal', 3)
+
+            calc_pho_loss = args.seq_frame_n > 1
+            if calc_pho_loss:
+                image_ori = sample_batched['image_ori'].cuda(args.gpu, non_blocking=True)
+                if args.seq_aside:
+                    image_side = sample_batched['image_side'].cuda(args.gpu, non_blocking=True)
+                    T_side = sample_batched['T_side'].cuda(args.gpu, non_blocking=True)
+                    off_side = sample_batched['off_side']
+                    rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, date_side=date_side, xy_crop=sample_batched['xy_crop'], image_side=image_side, T_side=T_side, off_side=off_side)
+                else:
+                    rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, date_side=date_side, xy_crop=sample_batched['xy_crop'])
+
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_pho_model', 3)
             # if args.dataset == 'nyu':
             #     mask = depth_gt > 0.1
             # else:
@@ -443,25 +494,59 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             # save_tensor_to_img(depth_mask, os.path.join(args.log_directory, args.model_name, '{}_pred'.format(global_step) ), 'mask')
             # save_tensor_to_img(depth_gt_mask, os.path.join(args.log_directory, args.model_name, '{}_gt'.format(global_step) ), 'mask')
             # save_tensor_to_img(mask, os.path.join(args.log_directory, args.model_name, '{}_ori'.format(global_step) ), 'mask')
-
+ 
             # loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
             loss = silog_criterion.forward(depth_est, depth_gt, depth_gt_mask)
             # loss.backward()
-            if args.turn_off_dloss <= 0:
-                loss_total = loss * args.silog_weight - inp * args.c3d_weight + pho_loss * args.pho_weight
-            elif epoch < args.turn_off_dloss:
-                loss_total = loss * args.silog_weight - inp * args.c3d_weight + pho_loss * args.pho_weight
+
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_dep_loss', 3)
+
+            loss_total = 0
+            use_dep_loss = args.turn_off_dloss <= 0 or epoch < args.turn_off_dloss
+            if use_dep_loss:
+                loss_total += loss * args.silog_weight
+                loss_total -= inp * args.c3d_weight
             else:
-                loss_total = - inp * args.c3d_weight * 10 + pho_loss * args.pho_weight
+                loss_total -= inp * args.c3d_weight * 10
+
+            if calc_pho_loss:
+                loss_total += pho_loss * args.pho_weight
                 
             # print(inp, pho_loss, loss) # 2000, 0.3, 3
 
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_loss_total', 3)
+
             loss_total.backward()
+            
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_backward', 3)
+
             for param_group in optimizer.param_groups:
                 current_lr = (args.learning_rate - end_learning_rate) * (1 - global_step / num_total_steps) ** 0.9 + end_learning_rate
                 param_group['lr'] = current_lr
 
             optimizer.step()
+            
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_optimizer_step', 3)
 
             if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
                 if global_step % args.print_freq == 0 :
@@ -518,8 +603,8 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                         writer.add_image('mask_gt/image/{}'.format(i), depth_gt_mask[i, :, :, :].data, global_step)
                         # writer.add_image('mask_ori/image/{}'.format(i), mask[i, :, :, :].data, global_step)
 
-                        # writer.add_image('normal_est/image/{}'.format(i), normal_est_vis[i, :, :, :], global_step)
-                        # writer.add_image('normal_gt/image/{}'.format(i), normal_gt_vis[i, :, :, :], global_step)
+                        writer.add_image('normal_est/image/{}'.format(i), normal_est_vis[i, :, :, :], global_step)
+                        writer.add_image('normal_gt/image/{}'.format(i), normal_gt_vis[i, :, :, :], global_step)
 
                         # name_global_step = '{}_{}.jpg'.format(global_step, i)
                         # name_abs_file = '{}_{}_{}.jpg'.format(sample_batched['date_str'][i], sample_batched['seq'][i], sample_batched['frame'][i])
@@ -527,15 +612,35 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                         #             path=os.path.join(args.log_directory, args.model_name, 'img_dep'), name=name_abs_file )
 
                         # writer.add_image('image_ori/image/{}'.format(i), image_ori[i, :, :, :], global_step)
-                    for i in range(len(rgb_preds)):
-                        target_id = i // 2 + 1
-                        offset = -1 if i % 2 == 0 else 1
-                        writer.add_image('image_recst/image/{}_from_{}'.format(target_id, target_id+offset), rgb_preds[i][0], global_step)
+                    if calc_pho_loss:
+                        if args.seq_aside:
+                            follow = (args.seq_frame_n - 1) // 2
+                            front = args.seq_frame_n - 1 - follow
+                            for i in range(batch_size_cur):
+                                for j in range(args.seq_frame_n-1):
+                                    # side_id = (args.seq_frame_n-1) * i + j
+                                    if j < front:
+                                        offset = j - front
+                                    else:
+                                        offset = j - front + 1
+                                    writer.add_image('image_recst/image/{}_from_{}'.format(i, offset), rgb_preds[j][i], global_step)
+                        else:
+                            for i in range(len(rgb_preds)):
+                                target_id = i // 2 + 1
+                                offset = -1 if i % 2 == 0 else 1
+                                writer.add_image('image_recst/image/{}_from_{}'.format(target_id, target_id+offset), rgb_preds[i][0], global_step)
                         
                     writer.flush()
 
             model_just_loaded = False
             global_step += 1
+                
+            if args.eval_time:
+                if args.gpu_sync:
+                    timer.log_temp('sync')
+                    torch.cuda.synchronize()
+                    timer.log_temp_end('sync')
+                timer.log('after_writer', 2)
 
         # ## test time consumption
         #     if global_step == 5:

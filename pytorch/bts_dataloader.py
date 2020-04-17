@@ -67,7 +67,7 @@ class BtsDataLoader(object):
                                     sampler=self.train_sampler)
             else:
                 # self.train_sampler = None
-                self.train_sampler = SamplerKITTI(self.training_samples, args.batch_size, args.seq_frame_n)   # to make sure all samples in a mini-batch have the same intrinsics
+                self.train_sampler = SamplerKITTI(self.training_samples, args.batch_size, args.seq_frame_n, args.seq_aside)   # to make sure all samples in a mini-batch have the same intrinsics
                 self.collate_class = Collate_Cfg(args.input_width, args.input_height)
                                     
                 self.data = DataLoader(self.training_samples, 
@@ -145,7 +145,7 @@ class DataLoadPreprocess(Dataset):
             self.frame2line, self.line2frame = frame_line_mapping(self.frame_idx, self.line_idx)
 
             ### for each (date, seq, side), get sample points, which should be sampled from
-            frame_idxs_to_sample, line_idx_to_sample = samp_from_seq(self.frame_idx, self.line_idx, args.seq_frame_n)
+            frame_idxs_to_sample, line_idx_to_sample = samp_from_seq(self.frame_idx, self.line_idx, args.seq_frame_n, args.seq_aside)
             self.lines_group = gen_samp_list(line_idx_to_sample, use_date_key=args.batch_same_intr) #every mini-batch should be sampled from the same group
 
 
@@ -158,7 +158,31 @@ class DataLoadPreprocess(Dataset):
         else:
             self.data_source = data_source
 
-    
+    def image_process(self, image, rand_realize):
+        random_angle = rand_realize['random_angle']
+
+        if self.args.do_kb_crop is True:
+            height = image.height
+            width = image.width
+            top_margin = int(height - 352)
+            left_margin = int((width - 1216) / 2)
+            image = image.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
+
+            xy_crop = (left_margin, top_margin, 1216, 352)
+
+        if self.args.dataset == 'nyu':
+            image = image.crop((43, 45, 608, 472))
+
+        ## rotate image
+        if self.args.do_random_rotate is True:
+            image = self.rotate_image(image, random_angle)
+        
+        ## to np array
+        image = np.asarray(image, dtype=np.float32) / 255.0
+
+        return image
+
+
     def __getitem__(self, idx):
         sample_path = self.filenames[idx]
         focal = float(sample_path.split()[2])
@@ -257,12 +281,47 @@ class DataLoadPreprocess(Dataset):
             ## get global pose of the camera
             pose_file = os.path.join(self.args.data_path, date_str, seq_str, 'poses', 'cam_{:02d}.txt'.format(side))
             with open(pose_file) as f:
-                cur_line = f.readlines()[frame]
+                T_lines = f.readlines()
+                cur_line = T_lines[frame]
             T = np.array( list(map(float, cur_line.split())) ).reshape(3,4)
             T = np.vstack( (T, np.array([[0,0,0,1]]))).astype(np.float32)
 
-            # sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop}
-            sample = {'image': image_aug, 'image_ori':image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T}
+            ## load neighbor images in seq_aside mode
+            if self.args.seq_aside and self.args.seq_frame_n > 1:
+                ## use the same randomized quantity as the curent frame
+                rand_realize = {}
+                if self.args.do_random_rotate is True:
+                    rand_realize['random_angle'] = random_angle
+
+                T_side = []
+                image_side = []
+                off_side = []
+                follow = (self.args.seq_frame_n - 1) // 2
+                front = self.args.seq_frame_n - 1 - follow
+                for offset in range(-front, follow+1):
+                    if offset == 0:
+                        continue
+                    ## load image
+                    line_cur = self.frame2line[(date_str, (seq_n, side), frame+offset)]
+                    image_path_cur = os.path.join(self.args.data_path, "./" + self.filenames[line_cur].split()[0])
+                    image_cur = Image.open(image_path_cur)
+                    image_cur = self.image_process(image_cur, rand_realize)
+                    ## load pose
+                    T_cur_line = T_lines[frame+offset]
+                    T_cur = np.array( list(map(float, T_cur_line.split())) ).reshape(3,4)
+                    T_cur = np.vstack( (T_cur, np.array([[0,0,0,1]]))).astype(np.float32)
+
+                    T_side.append(T_cur)
+                    image_side.append(image_cur)
+                    off_side.append(offset)
+
+                sample = {'image': image_aug, 'image_ori':image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 
+                            'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T, 
+                            'T_side': T_side, 'image_side': image_side, 'off_side': off_side }
+            else:
+                # sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop}
+                sample = {'image': image_aug, 'image_ori':image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 
+                            'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T}
         
         else:
             if self.mode == 'online_eval':
@@ -452,9 +511,21 @@ class ToTensor(object):
             mask_gt = self.to_tensor(mask_gt)
 
             image_ori = self.to_tensor(sample['image_ori'])
-            
-            return {'image': image, 'depth': depth, 'focal': focal, 'image_ori': image_ori,
-                    'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop'], 'seq': sample['seq'], 'frame': sample['frame'], 'T': T}
+
+            if 'image_side' in sample:
+                ## there are neighboring images to process
+                new_image_side = torch.stack([self.to_tensor(image_cur) for image_cur in sample['image_side'] ], dim=0) 
+                new_T_side = torch.stack([torch.from_numpy(T_cur) for T_cur in sample['T_side'] ], dim=0)
+                # new_image_side = self.to_tensor(sample['image_side']) 
+                # new_T_side = torch.from_numpy(sample['T_side'])
+                new_offset_side = sample['off_side']
+                
+                return {'image': image, 'depth': depth, 'focal': focal, 'image_ori': image_ori,
+                        'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop'], 'seq': sample['seq'], 'frame': sample['frame'], 'T': T, 
+                        'off_side': new_offset_side, 'image_side': new_image_side, 'T_side': new_T_side }
+            else:
+                return {'image': image, 'depth': depth, 'focal': focal, 'image_ori': image_ori,
+                        'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop'], 'seq': sample['seq'], 'frame': sample['frame'], 'T': T}
         else:
             has_valid_depth = sample['has_valid_depth']
             return {'image': image, 'depth': depth, 'focal': focal, 'has_valid_depth': has_valid_depth, 
