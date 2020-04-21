@@ -45,11 +45,13 @@ script_path = os.path.dirname(__file__)
 # from cvo_utils import save_tensor_to_img
 
 sys.path.append(os.path.join(script_path, "../../"))
+from c3d.utils.cam_proj import CamProj
 from c3d.c3d_loss import C3DLoss
 from c3d.pho_loss import PhoLoss
 from c3d.utils.io import save_tensor_to_img
 from c3d.utils.vis import vis_normal, vis_depth, overlay_dep_on_rgb
 from c3d.utils.timing import Timing
+from c3d.utils.cam import scale_image
 
 # from bts_utils import vis_depth, overlay_dep_on_rgb
 
@@ -322,13 +324,16 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     best_eval_measures_higher_better_dep = torch.zeros(3).cpu()
     best_eval_steps_dep = np.zeros(9, dtype=np.int32)
 
+    # CamProj Module
+    cam_proj_model = CamProj(args.data_path, batch_size=args.batch_size)
+
     # C3D module
-    c3d_model = C3DLoss(args.data_path, batch_size=args.batch_size, seq_frame_n=args.seq_frame_n)
+    c3d_model = C3DLoss(seq_frame_n=args.seq_frame_n_c3d)
     c3d_model.parse_opts(args_rest)
     c3d_model.cuda()
     
     # pho loss
-    pho_model = PhoLoss(args.data_path, batch_size=args.batch_size, seq_frame_n=args.seq_frame_n)
+    pho_model = PhoLoss()
     pho_model.cuda()
 
     # Training parameters
@@ -371,7 +376,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
     cudnn.benchmark = True
 
-    dataloader = BtsDataLoader(args, 'train')
+    dataloader = BtsDataLoader(args, 'train', cam_proj=cam_proj_model)
     dataloader_eval_raw = BtsDataLoader(args, 'online_eval', data_source='kitti_raw')
     dataloader_eval_dep = BtsDataLoader(args, 'online_eval', data_source='kitti_depth')
 
@@ -411,9 +416,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     if args.eval_time:
         timer = Timing()
         if args.gpu_sync:
-            timer.log_temp('sync')
-            torch.cuda.synchronize()
-            timer.log_temp_end('sync')
+            timer.log_cuda_sync()
         timer.log('start_of_epoch_loop', 0)
 
     while epoch < args.num_epochs:
@@ -423,14 +426,13 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
         for step, sample_batched in enumerate(dataloader.data):
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('start_of_batch_iter', 1)
 
             optimizer.zero_grad()
             before_op_time = time.time()
 
+            ## network inference
             image = torch.autograd.Variable(sample_batched['image'].cuda(args.gpu, non_blocking=True))
             focal = torch.autograd.Variable(sample_batched['focal'].cuda(args.gpu, non_blocking=True))
             depth_gt = torch.autograd.Variable(sample_batched['depth'].cuda(args.gpu, non_blocking=True))
@@ -439,51 +441,70 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_model', 3)
 
+            # ## prepare CamInfo object for c3d and pho error calculation
+            # date_side = (sample_batched['date_str'], sample_batched['side'])
+            # date_side_single = (date_side[0][0], int(date_side[1][0]) ) # originally it is a list. Take the first since the mini_batch share the same intrinsics. 
+            # xy_crop = sample_batched['xy_crop']
+            # batch_size = image.shape[0]       ## if drop_last is False in Sampler/DataLoader, then the batch_size is not constant. 
+            # cam_info = cam_proj_model.prepare_cam_info(date_side_single, xy_crop)
+
+            # ## prepare CamInfo for scaled images
+            # cam_info_scaled = cam_info.scale()
+            cam_info = sample_batched['cam_info'].cuda()
+
+            ## c3d error calculation
             Ts = sample_batched['T'].cuda(args.gpu, non_blocking=True)
             depth_mask = sample_batched['mask'].cuda(args.gpu, non_blocking=True)
             depth_gt_mask = sample_batched['mask_gt'].cuda(args.gpu, non_blocking=True)
-            date_side = (sample_batched['date_str'], sample_batched['side'])
-            inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, date_side, xy_crop=sample_batched['xy_crop'], Ts=Ts ) 
+            inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, cam_info, Ts=Ts ) 
 
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_inp', 3)
 
+            ## visualize normal direction map from c3d model
             normal_gt, normal_est = c3d_model.get_normal_feature()
             normal_gt_vis = vis_normal(normal_gt)
             normal_est_vis = vis_normal(normal_est)
 
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_vis_normal', 3)
 
-            calc_pho_loss = args.seq_frame_n > 1
+            ## pho error calculation
+            calc_pho_loss = args.seq_frame_n_pho > 1
             if calc_pho_loss:
                 image_ori = sample_batched['image_ori'].cuda(args.gpu, non_blocking=True)
-                if args.seq_aside:
-                    image_side = sample_batched['image_side'].cuda(args.gpu, non_blocking=True)
-                    T_side = sample_batched['T_side'].cuda(args.gpu, non_blocking=True)
-                    off_side = sample_batched['off_side']
-                    rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, date_side=date_side, xy_crop=sample_batched['xy_crop'], image_side=image_side, T_side=T_side, off_side=off_side)
+                image_side = sample_batched['image_side'].cuda(args.gpu, non_blocking=True)
+                T_side = sample_batched['T_side'].cuda(args.gpu, non_blocking=True)
+                off_side = sample_batched['off_side']
+                if args.side_full_img:
+                    xy_crop = tuple([elem.cuda(args.gpu, non_blocking=True) for elem in sample_batched['xy_crop']])
+                    rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, cam_info, image_side=image_side, T_side=T_side, off_side=off_side, xy_crop=xy_crop)
                 else:
-                    rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, date_side=date_side, xy_crop=sample_batched['xy_crop'])
+                    rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, cam_info, image_side=image_side, T_side=T_side, off_side=off_side)
+                # rgb_preds, pho_loss = pho_model(image_ori, depth_est, Ts, cam_info)
+
+                if args.other_scale > 0:
+                    image_ori_scaled = sample_batched['image_ori_scaled'].cuda(args.gpu, non_blocking=True)
+                    image_side_scaled = sample_batched['image_side_scaled'].cuda(args.gpu, non_blocking=True)
+                    cam_info_scaled = sample_batched['cam_info_scaled'].cuda()
+                    depth_est_scaled = scale_image(depth_est, cam_info_scaled.width, cam_info_scaled.height, torch_mode=True, nearest=False, raw_float=True)
+                    if args.side_full_img:
+                        xy_crop_scaled = tuple([elem.cuda(args.gpu, non_blocking=True) for elem in sample_batched['xy_crop_scaled']])
+                        rgb_preds_scaled, pho_loss_scaled = pho_model(image_ori_scaled, depth_est_scaled, Ts, cam_info_scaled, image_side=image_side_scaled, T_side=T_side, off_side=off_side, xy_crop=xy_crop_scaled)
+                    else:
+                        rgb_preds_scaled, pho_loss_scaled = pho_model(image_ori_scaled, depth_est_scaled, Ts, cam_info_scaled, image_side=image_side_scaled, T_side=T_side, off_side=off_side)
+                    pho_loss += pho_loss_scaled
 
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_pho_model', 3)
             # if args.dataset == 'nyu':
             #     mask = depth_gt > 0.1
@@ -495,24 +516,24 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             # save_tensor_to_img(depth_gt_mask, os.path.join(args.log_directory, args.model_name, '{}_gt'.format(global_step) ), 'mask')
             # save_tensor_to_img(mask, os.path.join(args.log_directory, args.model_name, '{}_ori'.format(global_step) ), 'mask')
  
+            ## depth error calculation
             # loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
             loss = silog_criterion.forward(depth_est, depth_gt, depth_gt_mask)
             # loss.backward()
 
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_dep_loss', 3)
 
+            ## summation over all errors
             loss_total = 0
             use_dep_loss = args.turn_off_dloss <= 0 or epoch < args.turn_off_dloss
             if use_dep_loss:
                 loss_total += loss * args.silog_weight
                 loss_total -= inp * args.c3d_weight
             else:
-                loss_total -= inp * args.c3d_weight * 10
+                loss_total -= inp * args.c3d_weight
 
             if calc_pho_loss:
                 loss_total += pho_loss * args.pho_weight
@@ -521,18 +542,15 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_loss_total', 3)
 
+            ## gradient backprop and parameter updates
             loss_total.backward()
             
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_backward', 3)
 
             for param_group in optimizer.param_groups:
@@ -543,11 +561,10 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_optimizer_step', 3)
 
+            ## printing and logging
             if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
                 if global_step % args.print_freq == 0 :
                     print('[epoch][s/s_per_e/gs]: [{}][{}/{}/{}], lr: {:.12f}, loss: {:.12f}'.format(epoch, step, steps_per_epoch, global_step, current_lr, loss))
@@ -613,22 +630,22 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
                         # writer.add_image('image_ori/image/{}'.format(i), image_ori[i, :, :, :], global_step)
                     if calc_pho_loss:
-                        if args.seq_aside:
-                            follow = (args.seq_frame_n - 1) // 2
-                            front = args.seq_frame_n - 1 - follow
-                            for i in range(batch_size_cur):
-                                for j in range(args.seq_frame_n-1):
-                                    # side_id = (args.seq_frame_n-1) * i + j
-                                    if j < front:
-                                        offset = j - front
-                                    else:
-                                        offset = j - front + 1
-                                    writer.add_image('image_recst/image/{}_from_{}'.format(i, offset), rgb_preds[j][i], global_step)
-                        else:
-                            for i in range(len(rgb_preds)):
-                                target_id = i // 2 + 1
-                                offset = -1 if i % 2 == 0 else 1
-                                writer.add_image('image_recst/image/{}_from_{}'.format(target_id, target_id+offset), rgb_preds[i][0], global_step)
+                        follow = (args.seq_frame_n_pho - 1) // 2
+                        front = args.seq_frame_n_pho - 1 - follow
+                        for i in range(batch_size_cur):
+                            for j in range(args.seq_frame_n_pho-1):
+                                # side_id = (args.seq_frame_n-1) * i + j
+                                if j < front:
+                                    offset = j - front
+                                else:
+                                    offset = j - front + 1
+                                writer.add_image('image_recst/image/{}_from_{}'.format(i, offset), rgb_preds[j][i], global_step)
+                                if args.other_scale > 0:
+                                    writer.add_image('image_recst_scaled/image/{}_from_{}'.format(i, offset), rgb_preds_scaled[j][i], global_step)
+                        # for i in range(len(rgb_preds)):
+                        #     target_id = i // 2 + 1
+                        #     offset = -1 if i % 2 == 0 else 1
+                        #     writer.add_image('image_recst/image/{}_from_{}'.format(target_id, target_id+offset), rgb_preds[i][0], global_step)
                         
                     writer.flush()
 
@@ -637,9 +654,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                 
             if args.eval_time:
                 if args.gpu_sync:
-                    timer.log_temp('sync')
-                    torch.cuda.synchronize()
-                    timer.log_temp_end('sync')
+                    timer.log_cuda_sync()
                 timer.log('after_writer', 2)
 
         # ## test time consumption

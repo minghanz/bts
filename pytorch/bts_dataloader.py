@@ -27,13 +27,13 @@ from distributed_sampler_no_evenly_divisible import *
 
 import cv2
 from skimage.morphology import binary_dilation, binary_closing
-from sampler_kitti import SamplerKITTI, Collate_Cfg, samp_from_seq, gen_samp_list, frame_line_mapping
+from sampler_kitti import SamplerKITTI, Collate_Cfg, samp_from_seq, gen_samp_list, frame_line_mapping, gen_rand_crop_tensor_param, crop_for_perfect_scaling
 # from bts_pre_intr import preload_K, load_velodyne_points, lidar_to_depth
 import sys
 script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, "../../"))
 from c3d.utils.dataset_kitti import preload_K, load_velodyne_points
-from c3d.utils.cam import lidar_to_depth
+from c3d.utils.cam import lidar_to_depth, scale_K, scale_from_size, crop_and_scale_K, scale_image
 
 import re
 
@@ -54,7 +54,7 @@ def preprocessing_transforms(mode):
 
 
 class BtsDataLoader(object):
-    def __init__(self, args, mode, data_source=None):
+    def __init__(self, args, mode, data_source=None, cam_proj=None):
         if mode == 'train':
             self.training_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode), data_source=data_source)
             if args.distributed:
@@ -67,8 +67,8 @@ class BtsDataLoader(object):
                                     sampler=self.train_sampler)
             else:
                 # self.train_sampler = None
-                self.train_sampler = SamplerKITTI(self.training_samples, args.batch_size, args.seq_frame_n, args.seq_aside)   # to make sure all samples in a mini-batch have the same intrinsics
-                self.collate_class = Collate_Cfg(args.input_width, args.input_height)
+                self.train_sampler = SamplerKITTI(self.training_samples, args.batch_size, args.seq_frame_n_c3d, args.seq_frame_n_pho)   # to make sure all samples in a mini-batch have the same intrinsics
+                self.collate_class = Collate_Cfg(args.input_width, args.input_height, args.seq_frame_n_c3d, args.other_scale, args.side_full_img, cam_proj=cam_proj)
                                     
                 self.data = DataLoader(self.training_samples, 
                                     num_workers=args.num_threads,
@@ -145,8 +145,14 @@ class DataLoadPreprocess(Dataset):
             self.frame2line, self.line2frame = frame_line_mapping(self.frame_idx, self.line_idx)
 
             ### for each (date, seq, side), get sample points, which should be sampled from
-            frame_idxs_to_sample, line_idx_to_sample = samp_from_seq(self.frame_idx, self.line_idx, args.seq_frame_n, args.seq_aside)
+            frame_idxs_to_sample, line_idx_to_sample = samp_from_seq(self.frame_idx, self.line_idx, args.seq_frame_n_c3d, args.seq_frame_n_pho)
             self.lines_group = gen_samp_list(line_idx_to_sample, use_date_key=args.batch_same_intr) #every mini-batch should be sampled from the same group
+
+            self.rand_crop_done_indv = self.args.seq_frame_n_c3d == 1
+            self.side_img_needed = self.args.seq_frame_n_pho > 1
+            self.scale_img_needed = self.rand_crop_done_indv and self.args.seq_frame_n_pho > 1 and self.args.other_scale > 0
+            self.velo_needed = self.args.keep_velo
+            self.dont_crop_side = self.args.side_full_img
 
 
         self.K_dict = preload_K(args.data_path)
@@ -157,31 +163,137 @@ class DataLoadPreprocess(Dataset):
             self.data_source = self.args.data_source
         else:
             self.data_source = data_source
+    
+    def image_process(self, image, mode, need_mask=False, need_crop=True, op_params=None):
+        '''
+        image: PIL.Image object
+        op_params.keys: 'random_angle'
+        '''
+        assert mode == 'img' or mode == 'dep'
+        if op_params is None:
+            new_op_params = {}
 
-    def image_process(self, image, rand_realize):
-        random_angle = rand_realize['random_angle']
-
-        if self.args.do_kb_crop is True:
-            height = image.height
-            width = image.width
-            top_margin = int(height - 352)
-            left_margin = int((width - 1216) / 2)
-            image = image.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
-
-            xy_crop = (left_margin, top_margin, 1216, 352)
-
-        if self.args.dataset == 'nyu':
-            image = image.crop((43, 45, 608, 472))
+        height = image.height
+        width = image.width
+        if op_params is None:
+            xy_crop = (0, 0, width, height)
+        ## kb_crop the center 1216*352
+        if need_crop:
+            ############### !!!!!!!!!!! Minghan: we disable do_kb_crop in training because later there are random crops
+            # if self.args.do_kb_crop is True:
+            #     top_margin = int(height - 352)
+            #     left_margin = int((width - 1216) / 2)
+            #     image = image.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
+                
+            #     if op_params is None:
+            #         xy_crop = (left_margin, top_margin, 1216, 352)
+        
+            # To avoid blank boundaries due to pixel registration
+            if self.args.dataset == 'nyu':
+                image = image.crop((43, 45, 608, 472))
 
         ## rotate image
         if self.args.do_random_rotate is True:
-            image = self.rotate_image(image, random_angle)
+            if op_params is not None:
+                random_angle = op_params['random_angle']
+            else:
+                random_angle = (random.random() - 0.5) * 2 * self.args.degree
+                new_op_params['random_angle'] = random_angle
+
+            if mode == 'img':
+                image = self.rotate_image(image, random_angle)
+            elif mode == 'dep':
+                image = self.rotate_image(image, random_angle, flag=Image.NEAREST)
         
         ## to np array
-        image = np.asarray(image, dtype=np.float32) / 255.0
+        if mode == 'img':
+            image = np.asarray(image, dtype=np.float32) / 255.0
+        elif mode == 'dep':
+            image = np.asarray(image, dtype=np.float32)
 
-        return image
+        ## generate masks
+        if mode == 'dep':
+            if need_mask:
+                mask_gt = image > 0
+                mask = binary_closing(mask_gt, self.dilate_struct)
 
+            ## create channel dimension at the end
+            image = np.expand_dims(image, axis=2)
+            if need_mask:
+                mask_gt = np.expand_dims(mask_gt, axis=2)
+                mask = np.expand_dims(mask, axis=2)
+
+            ## get the depth map of true scale
+            if self.args.dataset == 'nyu':
+                image = image / 1000.0
+            elif self.data_source == 'kitti_depth':
+                image = image / 256.0
+
+        if need_crop and self.rand_crop_done_indv:
+            ## random crop
+            if op_params is not None:
+                x_start = op_params['random_crop_x']
+                y_start = op_params['random_crop_y']
+            else:
+                x_start, y_start = gen_rand_crop_tensor_param(image, target_width=self.args.input_width, target_height=self.args.input_height, h_dim=0, w_dim=1, scale=self.args.other_scale, ori_crop=xy_crop)
+                # x_start = random.randint(0, image.shape[1] - self.args.input_width)
+                # y_start = random.randint(0, image.shape[0] - self.args.input_height)
+                # ## Make sure the crop offset can be divided by scaling factor if any, 
+                # ## to make sure that the cropped-then-scaled image will be exactly a subset of the original-scaled image. 
+                # if self.args.other_scale > 0:
+                #     if xy_crop is not None:
+                #         x_res = (x_start+xy_crop[0]) % self.args.other_scale
+                #         y_res = (y_start+xy_crop[1]) % self.args.other_scale
+                #     else:
+                #         x_res = x_start % self.args.other_scale
+                #         y_res = y_start % self.args.other_scale
+                #     x_start -= x_res
+                #     y_start -= y_res
+                #     if x_start < 0:
+                #         x_start += self.args.other_scale
+                #         if x_start + self.args.input_width > image.shape[1]:
+                #             raise ValueError('cropping failed, the previous cropping is too tight to adjust for proper scaling consistency')
+                #     if y_start < 0:
+                #         y_start += self.args.other_scale
+                #         if y_start + self.args.input_height > image.shape[0]:
+                #             raise ValueError('cropping failed, the previous cropping is too tight to adjust for proper scaling consistency')
+
+                new_op_params['random_crop_x'] = x_start
+                new_op_params['random_crop_y'] = y_start
+            
+            assert image.shape[0] >= self.args.input_height and image.shape[1] >= self.args.input_width
+            image = image[y_start:y_start + self.args.input_height, x_start:x_start + self.args.input_width, :]
+            # image, depth_gt, mask, mask_gt, x_start, y_start = self.random_crop(image, depth_gt, mask, mask_gt, self.args.input_height, self.args.input_width)
+            if mode == 'dep' and need_mask:
+                mask = mask[y_start:y_start + self.args.input_height, x_start:x_start + self.args.input_width, :]
+                mask_gt = mask_gt[y_start:y_start + self.args.input_height, x_start:x_start + self.args.input_width, :]
+
+            if op_params is None:
+                x_size = self.args.input_width
+                y_size = self.args.input_height
+                x_start = x_start + xy_crop[0]
+                y_start = y_start + xy_crop[1]
+                xy_crop = (x_start, y_start, x_size, y_size)
+
+        if op_params is None:
+            new_op_params['xy_crop'] = xy_crop
+
+        if mode == 'img':
+            if op_params is None:
+                return image, new_op_params
+            else:
+                return image
+        elif mode == 'dep':
+            if need_mask:
+                if op_params is None:
+                    return image, mask_gt, mask, new_op_params
+                else:
+                    return image, mask_gt, mask
+            else:
+                if op_param is None:
+                    return image, new_op_params
+                else:
+                    return image
 
     def __getitem__(self, idx):
         sample_path = self.filenames[idx]
@@ -218,61 +330,37 @@ class DataLoadPreprocess(Dataset):
                 im_shape = (image.height, image.width)
                 assert image.height == self.K_dict[(date_str, side)].height
                 assert image.width == self.K_dict[(date_str, side)].width
-                depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape)
+                depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape, torch_mode=False)
                 depth_gt = Image.fromarray(depth_gt.astype(np.float32), 'F') #mode 'F' means float32
             else:
                 raise ValueError("self.data_source not recognized")
             
-            ## kb_crop the center 1216*352
-            if self.args.do_kb_crop is True:
-                height = image.height
-                width = image.width
-                top_margin = int(height - 352)
-                left_margin = int((width - 1216) / 2)
-                depth_gt = depth_gt.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
-                image = image.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
-
-                xy_crop = (left_margin, top_margin, 1216, 352)
-            
-            # To avoid blank boundaries due to pixel registration
-            if self.args.dataset == 'nyu':
-                depth_gt = depth_gt.crop((43, 45, 608, 472))
-                image = image.crop((43, 45, 608, 472))
-    
-            ## rotate image
-            if self.args.do_random_rotate is True:
-                random_angle = (random.random() - 0.5) * 2 * self.args.degree
-                image = self.rotate_image(image, random_angle)
-                depth_gt = self.rotate_image(depth_gt, random_angle, flag=Image.NEAREST)
-            
-            ## to np array
-            image = np.asarray(image, dtype=np.float32) / 255.0
-            depth_gt = np.asarray(depth_gt, dtype=np.float32)
-
-            ## generate masks
-            mask_gt = depth_gt > 0
-            mask = binary_closing(mask_gt, self.dilate_struct)
-
-            ## create channel dimension at the end
-            depth_gt = np.expand_dims(depth_gt, axis=2)
-            mask_gt = np.expand_dims(mask_gt, axis=2)
-            mask = np.expand_dims(mask, axis=2)
-
-            ## get the depth map of true scale
-            if self.args.dataset == 'nyu':
-                depth_gt = depth_gt / 1000.0
-            elif self.data_source == 'kitti_depth':
-                depth_gt = depth_gt / 256.0
-
-            # ## random crop
-            # image, depth_gt, mask, mask_gt, x_start, y_start = self.random_crop(image, depth_gt, mask, mask_gt, self.args.input_height, self.args.input_width)
-
-            # if self.args.do_kb_crop is True:
-            #     x_start = x_start + left_margin
-            #     y_start = y_start + top_margin
-            # x_size = self.args.input_width
-            # y_size = self.args.input_height
+            image, op_params = self.image_process(image, mode='img', need_mask=False, op_params=None)
+            depth_gt, mask_gt, mask = self.image_process(depth_gt, mode='dep', need_mask=True, op_params=op_params)
+            xy_crop = op_params['xy_crop']
             # xy_crop = (x_start, y_start, x_size, y_size)
+
+            ## if random crop is done in __getitem__, we can continue to scale the cropped image if wanted
+            ## if random crop is done in collate_fn, then the scaling should be done there too. 
+            if self.scale_img_needed:
+                scale = 1/self.args.other_scale
+                scaled_height = scale * xy_crop[3]
+                scaled_width = scale * xy_crop[2]
+                image_ori_scaled = scale_image(image, new_width=scaled_width, new_height=scaled_height, torch_mode=True, raw_float=False, nearest=False, align_corner=False)
+                # image_ori_scaled = np.asarray(image_ori_scaled, dtype=np.float32) / 255.0
+                # if self.data_source == 'kitti_depth':
+                #     depth_gt_scaled = scale_image(depth_gt, new_width=scaled_width, new_height=scaled_height, torch_mode=False, nearest=True, raw_float=True )
+                #     depth_gt_scaled = np.asarray(depth_gt_scaled, dtype=np.float32)
+                # elif self.data_source == 'kitti_raw':
+                #     scale_w, scale_h = scale_from_size(new_width=image.width, new_height=image.height)
+                #     original_K = scale_K(K_unit, scale_w, scale_h, torch_mode=False)
+
+                #     scaled_cropped_K = crop_and_scale_K(original_K, xy_crop, scale, torch_mode=False)
+                #     depth_gt_scaled = lidar_to_depth(velo, extr_cam_li, im_shape=(scaled_height, scaled_width), K_ready=scaled_cropped_K, K_unit=None)
+                #     depth_gt_scaled = np.expand_dims(depth_gt_scaled, axis=2)
+                # else:
+                #     raise ValueError("self.data_source not recognized")
+
 
             ## random flip, gamma, brightness, color augmentation
             ## Minghan: random flip disabled
@@ -282,22 +370,20 @@ class DataLoadPreprocess(Dataset):
             pose_file = os.path.join(self.args.data_path, date_str, seq_str, 'poses', 'cam_{:02d}.txt'.format(side))
             with open(pose_file) as f:
                 T_lines = f.readlines()
-                cur_line = T_lines[frame]
+            cur_line = T_lines[frame]
             T = np.array( list(map(float, cur_line.split())) ).reshape(3,4)
             T = np.vstack( (T, np.array([[0,0,0,1]]))).astype(np.float32)
 
             ## load neighbor images in seq_aside mode
-            if self.args.seq_aside and self.args.seq_frame_n > 1:
+            if self.side_img_needed:
                 ## use the same randomized quantity as the curent frame
-                rand_realize = {}
-                if self.args.do_random_rotate is True:
-                    rand_realize['random_angle'] = random_angle
-
                 T_side = []
                 image_side = []
                 off_side = []
-                follow = (self.args.seq_frame_n - 1) // 2
-                front = self.args.seq_frame_n - 1 - follow
+                if self.scale_img_needed:
+                    image_side_scaled = []
+                follow = (self.args.seq_frame_n_pho - 1) // 2
+                front = self.args.seq_frame_n_pho - 1 - follow
                 for offset in range(-front, follow+1):
                     if offset == 0:
                         continue
@@ -305,7 +391,7 @@ class DataLoadPreprocess(Dataset):
                     line_cur = self.frame2line[(date_str, (seq_n, side), frame+offset)]
                     image_path_cur = os.path.join(self.args.data_path, "./" + self.filenames[line_cur].split()[0])
                     image_cur = Image.open(image_path_cur)
-                    image_cur = self.image_process(image_cur, rand_realize)
+                    image_cur = self.image_process(image_cur, mode='img', need_mask=False, need_crop=(not self.dont_crop_side), op_params=op_params)
                     ## load pose
                     T_cur_line = T_lines[frame+offset]
                     T_cur = np.array( list(map(float, T_cur_line.split())) ).reshape(3,4)
@@ -315,14 +401,32 @@ class DataLoadPreprocess(Dataset):
                     image_side.append(image_cur)
                     off_side.append(offset)
 
-                sample = {'image': image_aug, 'image_ori':image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 
-                            'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T, 
-                            'T_side': T_side, 'image_side': image_side, 'off_side': off_side }
-            else:
-                # sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop}
-                sample = {'image': image_aug, 'image_ori':image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 
+                    if self.scale_img_needed:
+                        scale = 1/self.args.other_scale
+                        if self.dont_crop_side:
+                            x_crop_size, y_crop_size = crop_for_perfect_scaling(image_cur, self.args.other_scale, h_dim=0, w_dim=1)
+                            image_cur = image_cur[:y_crop_size, :x_crop_size, :]
+                            scaled_height_side = scale * y_crop_size
+                            scaled_width_side = scale * x_crop_size
+                        else:
+                            scaled_height_side = scale * xy_crop[3]
+                            scaled_width_side = scale * xy_crop[2]
+                        image_side_scaled_cur = scale_image(image_cur, new_width=scaled_width_side, new_height=scaled_height_side, torch_mode=True, raw_float=False, nearest=False, align_corner=False)
+                        # image_side_scaled_cur = np.asarray(image_side_scaled_cur, dtype=np.float32) / 255.0
+                        image_side_scaled.append(image_side_scaled_cur)
+
+            xy_crop = tuple(np.float32(elem) for elem in xy_crop)
+            sample = {'image': image_aug, 'image_ori':image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 
                             'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T}
-        
+
+            if self.side_img_needed:
+                sample.update({'T_side': T_side, 'image_side': image_side, 'off_side': off_side})
+            if self.scale_img_needed:
+                sample.update({'image_ori_scaled': image_ori_scaled})      
+            if self.side_img_needed and self.scale_img_needed:
+                sample.update({'image_side_scaled': image_side_scaled})
+            if self.velo_needed:
+                sample.update({'velo': velo})
         else:
             if self.mode == 'online_eval':
                 data_path = self.args.data_path_eval
@@ -360,7 +464,7 @@ class DataLoadPreprocess(Dataset):
                         im_shape = (image.shape[0], image.shape[1])
                         assert image.shape[0] == self.K_dict[(date_str, side)].height
                         assert image.shape[1] == self.K_dict[(date_str, side)].width
-                        depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape)
+                        depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape, torch_mode=False)
                         depth_gt = depth_gt.astype(np.float32)
                         # depth_gt = Image.fromarray(depth_gt.astype(np.float32), 'F') #mode 'F' means float32
                         # depth_gt_ary = np.array(depth_gt)
@@ -406,6 +510,7 @@ class DataLoadPreprocess(Dataset):
             x_size = 1216
             y_size = 352
             xy_crop = (x_start, y_start, x_size, y_size)
+            xy_crop = tuple(float(elem) for elem in xy_crop)
 
             if self.mode == 'online_eval':
                 ## get global pose of the camera
@@ -430,18 +535,18 @@ class DataLoadPreprocess(Dataset):
         result = image.rotate(angle, resample=flag)
         return result
 
-    def random_crop(self, img, depth, mask, mask_gt, height, width):
-        assert img.shape[0] >= height
-        assert img.shape[1] >= width
-        assert img.shape[0] == depth.shape[0]
-        assert img.shape[1] == depth.shape[1]
-        x = random.randint(0, img.shape[1] - width)
-        y = random.randint(0, img.shape[0] - height)
-        img = img[y:y + height, x:x + width, :]
-        depth = depth[y:y + height, x:x + width, :]
-        mask = mask[y:y + height, x:x + width, :]
-        mask_gt = mask_gt[y:y + height, x:x + width, :]
-        return img, depth, mask, mask_gt, x, y
+    # def random_crop(self, img, depth, mask, mask_gt, height, width):
+    #     assert img.shape[0] >= height
+    #     assert img.shape[1] >= width
+    #     assert img.shape[0] == depth.shape[0]
+    #     assert img.shape[1] == depth.shape[1]
+    #     x = random.randint(0, img.shape[1] - width)
+    #     y = random.randint(0, img.shape[0] - height)
+    #     img = img[y:y + height, x:x + width, :]
+    #     depth = depth[y:y + height, x:x + width, :]
+    #     mask = mask[y:y + height, x:x + width, :]
+    #     mask_gt = mask_gt[y:y + height, x:x + width, :]
+    #     return img, depth, mask, mask_gt, x, y
 
     def train_preprocess(self, image, depth_gt, mask, mask_gt):
         # # Random flipping
@@ -512,6 +617,9 @@ class ToTensor(object):
 
             image_ori = self.to_tensor(sample['image_ori'])
 
+            new_batch = {'image': image, 'depth': depth, 'focal': focal, 'image_ori': image_ori,
+                        'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop'], 'seq': sample['seq'], 'frame': sample['frame'], 'T': T }
+
             if 'image_side' in sample:
                 ## there are neighboring images to process
                 new_image_side = torch.stack([self.to_tensor(image_cur) for image_cur in sample['image_side'] ], dim=0) 
@@ -519,13 +627,23 @@ class ToTensor(object):
                 # new_image_side = self.to_tensor(sample['image_side']) 
                 # new_T_side = torch.from_numpy(sample['T_side'])
                 new_offset_side = sample['off_side']
+
+                new_batch['off_side'] = new_offset_side
+                new_batch['image_side'] = new_image_side
+                new_batch['T_side'] = new_T_side
                 
-                return {'image': image, 'depth': depth, 'focal': focal, 'image_ori': image_ori,
-                        'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop'], 'seq': sample['seq'], 'frame': sample['frame'], 'T': T, 
-                        'off_side': new_offset_side, 'image_side': new_image_side, 'T_side': new_T_side }
-            else:
-                return {'image': image, 'depth': depth, 'focal': focal, 'image_ori': image_ori,
-                        'mask': mask, 'mask_gt': mask_gt, 'date_str': sample['date_str'], 'side': sample['side'], 'xy_crop': sample['xy_crop'], 'seq': sample['seq'], 'frame': sample['frame'], 'T': T}
+            if 'image_ori_scaled' in sample:
+                image_ori_scaled = self.to_tensor(sample['image_ori_scaled'])
+                new_batch['image_ori_scaled'] = image_ori_scaled
+
+            if 'image_side_scaled' in sample:
+                image_side_scaled = torch.stack([self.to_tensor(image_cur) for image_cur in sample['image_side_scaled'] ], dim=0) 
+                new_batch['image_side_scaled'] = image_side_scaled
+
+            if 'velo' in sample:
+                new_batch['velo'] = torch.from_numpy(sample['velo'])
+
+            return new_batch
         else:
             has_valid_depth = sample['has_valid_depth']
             return {'image': image, 'depth': depth, 'focal': focal, 'has_valid_depth': has_valid_depth, 

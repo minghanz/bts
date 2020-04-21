@@ -3,38 +3,103 @@ from torch.utils.data.sampler import Sampler, SubsetRandomSampler
 # from torch._six import int_classes as int_classes
 import random
 from torch._six import container_abcs, string_classes, int_classes
+import numpy as np
 
-def random_crop_tensor(img, depth, mask, mask_gt, image_ori, height, width, batched):
-    if batched:
-        h, w = 2, 3
-    else:
-        h, w = 1, 2
-    assert img.shape[h] >= height
-    assert img.shape[w] >= width
-    assert img.shape[h] == depth.shape[h]
-    assert img.shape[w] == depth.shape[w]
-    x = random.randint(0, img.shape[w] - width)
-    y = random.randint(0, img.shape[h] - height)
+import sys, os
+script_path = os.path.dirname(__file__)
+sys.path.append(os.path.join(script_path, "../../"))
+from c3d.utils.cam import lidar_to_depth, scale_K, scale_from_size, crop_and_scale_K, scale_image
 
-    img = img[..., y:y + height, x:x + width]
-    depth = depth[..., y:y + height, x:x + width]
-    mask = mask[..., y:y + height, x:x + width]
-    mask_gt = mask_gt[..., y:y + height, x:x + width]
-    image_ori = image_ori[..., y:y + height, x:x + width]
-    return img, depth, mask, mask_gt, image_ori, x, y
+def scale_xy_crop(xy_crop, scale):
+    apply_scale = 1 / scale
+    assert apply_scale != 0
+    new_xy_crop = tuple([elem * apply_scale for elem in xy_crop])
+    # print('ori:', xy_crop)
+    # print('scl:', new_xy_crop)
+    return new_xy_crop
+
+def crop_for_perfect_scaling(img, scale, h_dim, w_dim):
+    x_res = img.shape[w_dim] % scale
+    x_crop_size = img.shape[w_dim] - x_res
+    y_res = img.shape[h_dim] % scale
+    y_crop_size = img.shape[h_dim] - y_res
+    return x_crop_size, y_crop_size
+
+def gen_rand_crop_tensor_param(img, target_width, target_height, h_dim, w_dim, scale=-1, ori_crop=None):
+    # if batched:
+    #     h, w = 2, 3
+    # else:
+    #     h, w = 1, 2
+    assert img.shape[h_dim] >= target_height
+    assert img.shape[w_dim] >= target_width
+    x = random.randint(0, img.shape[w_dim] - target_width)
+    y = random.randint(0, img.shape[h_dim] - target_height)
+    if scale > 0:
+        if ori_crop is not None:
+            ori_x_start = ori_crop[0]
+            ori_y_start = ori_crop[1]
+        else:
+            ori_x_start = 0
+            ori_y_start = 0
+        x_res = (x + ori_x_start) % scale
+        y_res = (y + ori_y_start) % scale
+        x -= x_res
+        y -= y_res
+
+        if x < 0:
+            x += scale
+            if x + target_width > img.shape[w_dim]:
+                raise ValueError('cropping failed, the previous cropping is too tight to adjust for proper scaling consistency. img.shape: {}, w_dim: {}, h_dim: {}, tgt_w: {}, tgt_h: {}, x: {}, ori_x: {}'.format(\
+                                    img.shape, w_dim, h_dim, target_width, target_height, x, ori_x_start))
+        if y < 0:
+            y += scale
+            if y + target_height > img.shape[h_dim]:
+                raise ValueError('cropping failed, the previous cropping is too tight to adjust for proper scaling consistency. img.shape: {}, w_dim: {}, h_dim: {}, tgt_w: {}, tgt_h: {}, y: {}, ori_y: {}'.format(\
+                                    img.shape, w_dim, h_dim, target_width, target_height, y, ori_y_start))
+
+    return x, y
+
+# def random_crop_tensor(img, depth, mask, mask_gt, image_ori, height, width, batched):
+#     if batched:
+#         h, w = 2, 3
+#     else:
+#         h, w = 1, 2
+#     assert img.shape[h] >= height
+#     assert img.shape[w] >= width
+#     assert img.shape[h] == depth.shape[h]
+#     assert img.shape[w] == depth.shape[w]
+#     x = random.randint(0, img.shape[w] - width)
+#     y = random.randint(0, img.shape[h] - height)
+
+#     img = img[..., y:y + height, x:x + width]
+#     depth = depth[..., y:y + height, x:x + width]
+#     mask = mask[..., y:y + height, x:x + width]
+#     mask_gt = mask_gt[..., y:y + height, x:x + width]
+#     image_ori = image_ori[..., y:y + height, x:x + width]
+#     return img, depth, mask, mask_gt, image_ori, x, y
 
 
 class Collate_Cfg:
-    def __init__(self, width, height):
+    def __init__(self, width, height, seq_frame_n_c3d, other_scale, side_full_img, cam_proj=None):
         self.net_input_width = width
         self.net_input_height = height
-        # self.seq_frame_n = seq_frame_n
+        self.seq_frame_n_c3d = seq_frame_n_c3d
+        self.other_scale = other_scale
+        
+        self.rand_crop_done_batch = seq_frame_n_c3d > 1
+        self.scale_cam_info_needed = self.other_scale > 0
+        self.scale_img_needed = self.rand_crop_done_batch and other_scale > 0
+        self.dont_crop_side = side_full_img
+        self.scale_crop_needed = self.scale_cam_info_needed and self.dont_crop_side
 
         self.default_collate_err_msg_format = (
             "default_collate: batch must contain tensors, numpy arrays, numbers, "
             "dicts or lists; found {}")
 
+        self.cam_proj = cam_proj
+
     ### This is modified from original default_collate_fn in pytorch source code
+    ### https://github.com/pytorch/pytorch/blob/dc1f9eee531a95cb8f89b734c05f52c4bcdc59ab/torch/utils/data/_utils/collate.py#L42
     def collate_common_crop(self, batch):
         r"""Puts each data field into a tensor with outer dimension batch size"""
 
@@ -67,37 +132,136 @@ class Collate_Cfg:
         elif isinstance(elem, string_classes):
             return batch
         elif isinstance(elem, container_abcs.Mapping):
-            new_batch = {}
+            if self.rand_crop_done_batch:
+                ### random crop happens here if self.seq_frame_n_c3d > 1
+                new_batch = {}
 
-            image = torch.stack([batchi['image'] for batchi in batch], 0)
-            depth = torch.stack([batchi['depth'] for batchi in batch], 0)
-            mask = torch.stack([batchi['mask'] for batchi in batch], 0)
-            mask_gt = torch.stack([batchi['mask_gt'] for batchi in batch], 0)
-            image_ori = torch.stack([batchi['image_ori'] for batchi in batch], 0)
-            
-            image, depth, mask, mask_gt, image_ori, w_start, h_start = random_crop_tensor(image, depth, mask, mask_gt, image_ori, self.net_input_height, self.net_input_width, batched=True)
+                ##################### random cropping
+                image = torch.stack([batchi['image'] for batchi in batch], 0)
+                depth = torch.stack([batchi['depth'] for batchi in batch], 0)
+                mask = torch.stack([batchi['mask'] for batchi in batch], 0)
+                mask_gt = torch.stack([batchi['mask_gt'] for batchi in batch], 0)
+                image_ori = torch.stack([batchi['image_ori'] for batchi in batch], 0)
 
-            new_batch['image'] = image
-            new_batch['depth'] = depth
-            new_batch['mask'] = mask
-            new_batch['mask_gt'] = mask_gt
-            new_batch['image_ori'] = image_ori
+                w_start, h_start = gen_rand_crop_tensor_param(image, self.net_input_width, self.net_input_height, h_dim=-2, w_dim=-1, scale=self.other_scale, ori_crop=batchi['xy_crop'])
+                image = image[..., h_start: h_start+self.net_input_height, w_start: w_start+self.net_input_width]
+                depth = depth[..., h_start: h_start+self.net_input_height, w_start: w_start+self.net_input_width]
+                mask  =  mask[..., h_start: h_start+self.net_input_height, w_start: w_start+self.net_input_width]
+                mask_gt = mask_gt[..., h_start: h_start+self.net_input_height, w_start: w_start+self.net_input_width]
+                image_ori = image_ori[..., h_start: h_start+self.net_input_height, w_start: w_start+self.net_input_width]
+                # image, depth, mask, mask_gt, image_ori, w_start, h_start = random_crop_tensor(image, depth, mask, mask_gt, image_ori, self.net_input_height, self.net_input_width, batched=True)
 
-            if 'image_side' in elem: ## 'off_side' does not need separate processing
-                # new_batch['image_side'] = [ [ imagej[...,h_start:h_start + height, w_start:w_start + width] for imagej in batchi['image_side']] for batchi in batch]
-                new_batch['image_side'] = torch.stack([batchi['image_side'] for batchi in batch], 0)
-                new_batch['T_side'] = torch.stack([batchi['T_side'] for batchi in batch], 0)
+                new_batch['image'] = image
+                new_batch['depth'] = depth
+                new_batch['mask'] = mask
+                new_batch['mask_gt'] = mask_gt
+                new_batch['image_ori'] = image_ori
 
-            for batchi in batch:
-                (x_start, y_start, x_size, y_size) = batchi['xy_crop']
-                batchi['xy_crop'] = (x_start + w_start, y_start + h_start, self.net_input_width, self.net_input_height)
+                if 'image_side' in elem: ## 'off_side' does not need separate processing
+                    # new_batch['image_side'] = [ [ imagej[...,h_start:h_start + height, w_start:w_start + width] for imagej in batchi['image_side']] for batchi in batch]
+                    new_batch['T_side'] = torch.stack([batchi['T_side'] for batchi in batch], 0)
+                    new_batch['image_side'] = torch.stack([batchi['image_side'] for batchi in batch], 0)
+                    if self.dont_crop_side:
+                        x_side_size, y_side_size = crop_for_perfect_scaling(new_batch['image_side'], self.other_scale, h_dim=-2, w_dim=-1)
+                        new_batch['image_side'] = new_batch['image_side'][..., :y_side_size, :x_side_size]
+                    else:
+                        new_batch['image_side'] = new_batch['image_side'][..., h_start:h_start + self.net_input_height, w_start:w_start + self.net_input_width]
 
-            for key in elem:
-                if key not in ['image', 'depth', 'mask', 'mask_gt', 'image_ori', 'image_side', 'T_side']:
-                    new_batch[key] = self.collate_common_crop([d[key] for d in batch])
+                for batchi in batch:
+                    (x_start, y_start, x_size, y_size) = batchi['xy_crop']
+                    batchi['xy_crop'] = (x_start + w_start, y_start + h_start, self.net_input_width, self.net_input_height)
+                    batchi['xy_crop'] = tuple(np.float32(elem) for elem in batchi['xy_crop'])
+                
+                ##################### scaling
+                if self.scale_img_needed:
+                    scale = 1 / self.other_scale
+                    new_width = self.net_input_width * scale
+                    new_height = self.net_input_height * scale
+                    image_ori_scaled = scale_image(new_batch['image_ori'], new_width, new_height, torch_mode=True, nearest=False, raw_float=False)
+                    new_batch['image_ori_scaled'] = image_ori_scaled
 
-            return new_batch
-            # return {key: self.collate_common_crop([d[key] for d in batch]) for key in elem}
+                    if 'image_side' in elem:
+                        if self.dont_crop_side:
+                            new_width_side = x_side_size * scale
+                            new_height_side = y_side_size * scale
+                        else:
+                            new_width_side = new_width
+                            new_height_side = new_height
+
+                        img_side_scaled =[]
+                        for i_side in new_batch['image_side'].shape[1]:
+                            img_side_i = scale_image(new_batch['image_side'][:, i_side], new_width_side, new_height_side, torch_mode=True, nearest=False, raw_float=False)
+                            img_side_scaled.append(img_side_i)
+                        img_side_scaled = torch.stack(img_side_scaled, dim=1)
+                        new_batch['image_side_scaled'] = img_side_scaled
+
+                ##################### velo
+                if 'velo' in elem:
+                    new_batch['velo'] = [batchi['velo'] for batchi in batch]
+
+                ##################### all other items
+                for key in elem:
+                    if key not in ['image', 'depth', 'mask', 'mask_gt', 'image_ori', 'image_side', 'T_side', 'image_ori_scaled', 'image_side_scaled', 'velo']:
+                        new_batch[key] = self.collate_common_crop([d[key] for d in batch])
+
+                ##################### cam_info
+                date_side = (new_batch['date_str'][0], int(new_batch['side'][0]) )
+                cam_info = self.cam_proj.prepare_cam_info(date_side=date_side, xy_crop=new_batch['xy_crop'])
+                new_batch['cam_info'] = cam_info
+
+                if self.scale_cam_info_needed:
+                    cam_info_scaled = cam_info.scale(new_width, new_height)
+                    new_batch['cam_info_scaled'] = cam_info_scaled
+
+                if self.scale_crop_needed:
+                    new_batch['xy_crop_scaled'] = scale_xy_crop(new_batch['xy_crop'], self.other_scale)
+                
+                # ## if multiscale is used, need to create the scaled cropped image and image_side
+                # if self.other_scale > 0:
+                #     new_w = self.net_input_width / self.other_scale
+                #     new_h = self.net_input_height / self.other_scale
+                    
+                #     new_batch['image'] = scale_image(new_batch['image'], new_w, new_h, torch_mode=True, nearest=False, raw_float=False)
+                #     if 'velo' not in new_batch:
+                #         new_batch['depth'] = scale_image(new_batch['depth'], new_w, new_h, torch_mode=True, nearest=True, raw_float=True)
+                #     else:
+                #         cropped_K = new_batch['cam_info'].K_cur
+                #         scale_w_crop, scale_h_crop = scale_from_size(old_width=self.net_input_width, old_height=self.net_input_height, new_width=new_w, new_height=new_h)
+                #         scaled_cropped_K = scale_K(cropped_K, scale_w_crop, scale_h_crop, torch_mode=True)
+
+                #         depth_gt_scaled = lidar_to_depth(velo, extr_cam_li, im_shape=(scaled_height, scaled_width), K_ready=scaled_cropped_K, K_unit=None)
+
+                return new_batch
+            else:
+                new_batch = {}
+                ##################### velo
+                if 'velo' in elem:
+                    new_batch['velo'] = [batchi['velo'] for batchi in batch]
+
+                ##################### all other items
+                for key in elem:
+                    if key not in ['velo']:
+                        new_batch[key] = self.collate_common_crop([d[key] for d in batch])
+
+                # new_batch = {key: self.collate_common_crop([d[key] for d in batch]) for key in elem}
+
+                ##################### cam_info
+                date_side = (new_batch['date_str'][0], int(new_batch['side'][0]) )
+                cam_info = self.cam_proj.prepare_cam_info(date_side=date_side, xy_crop=new_batch['xy_crop'])
+                new_batch['cam_info'] = cam_info
+                
+                if self.scale_cam_info_needed:
+                    scale = 1 / self.other_scale
+                    new_width = self.net_input_width * scale
+                    new_height = self.net_input_height * scale
+                    cam_info_scaled = cam_info.scale(new_width, new_height)
+                    new_batch['cam_info_scaled'] = cam_info_scaled
+                
+                ##################### scale xy_crop
+                if self.scale_crop_needed:
+                    new_batch['xy_crop_scaled'] = scale_xy_crop(new_batch['xy_crop'], self.other_scale)
+
+                return new_batch
         elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple
             return elem_type(*(self.collate_common_crop(samples) for samples in zip(*batch)))
         elif isinstance(elem, container_abcs.Sequence):
@@ -110,6 +274,7 @@ def check_neighbor_exist(frame, frame_idxs, seq_frame_n):
     follow = (seq_frame_n - 1) // 2
     front = seq_frame_n - 1 - follow
     need = True
+    need = need and frame in frame_idxs
     for i in range(1, follow+1):
         need = need and frame+i in frame_idxs
     for i in range(1, front+1):
@@ -125,7 +290,7 @@ def check_need_to_sample(frame, frame_idxs, frame_idxs_to_sample, seq_frame_n):
         
     return need
 
-def samp_from_seq(frame_idxs, line_idxs, seq_frame_n, seq_aside):
+def samp_from_seq(frame_idxs, line_idxs, seq_frame_n_c3d, seq_frame_n_pho):
     '''Samp once every seq_frame_n frames in a date-seq-side sequence
     '''
     line_idx_to_sample = {}
@@ -142,8 +307,8 @@ def samp_from_seq(frame_idxs, line_idxs, seq_frame_n, seq_aside):
             frame_idxs_to_sample[date][seq_side] = []
 
             for i, frame in enumerate(frame_idxs[date][seq_side]):
-                condition = check_neighbor_exist(frame, frame_idxs[date][seq_side], seq_frame_n) if seq_aside \
-                            else check_need_to_sample(frame, frame_idxs[date][seq_side], frame_idxs_to_sample[date][seq_side], seq_frame_n)
+                condition = check_neighbor_exist(frame, frame_idxs[date][seq_side], seq_frame_n_pho) and \
+                            check_need_to_sample(frame, frame_idxs[date][seq_side], frame_idxs_to_sample[date][seq_side], seq_frame_n_c3d)
                 if condition:
                     frame_idxs_to_sample[date][seq_side].append(frame)
                     line_idx_to_sample[date][seq_side].append(line_idxs[date][seq_side][i])
@@ -180,13 +345,13 @@ def frame_line_mapping(frame_idxs, line_idxs):
 class SamplerKITTI(Sampler):
     """Every sampled mini-batch are from the same date so that they can share the same uvb_flat and xy1_flat in C3DLoss
     """
-    def __init__(self, dataset, batch_size, seq_frame_n, seq_aside, drop_last=False ): 
+    def __init__(self, dataset, batch_size, seq_frame_n_c3d, seq_frame_n_pho, drop_last=False ): 
         # drop_last default to False according to https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader
         self.dataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
-        self.seq_frame_n = seq_frame_n
-        self.seq_aside = seq_aside
+        self.seq_frame_n_c3d = seq_frame_n_c3d
+        self.seq_frame_n_pho = seq_frame_n_pho
 
         if not isinstance(batch_size, int_classes) or isinstance(batch_size, bool) or \
                 batch_size <= 0:
@@ -226,9 +391,9 @@ class SamplerKITTI(Sampler):
                 try:
                     idx = next(sub_iters[key])
                     date, seq_side, frame = self.dataset.line2frame[idx]
-                    if not self.seq_aside:
+                    if self.seq_frame_n_c3d > 1:
                         idx_next = []
-                        for i in range(1, self.seq_frame_n):
+                        for i in range(1, self.seq_frame_n_c3d):
                             idx_next.append(self.dataset.frame2line[(date, seq_side, frame+i)])
 
                 except StopIteration:
@@ -236,7 +401,7 @@ class SamplerKITTI(Sampler):
                     break
                 else:
                     batch.append(idx)
-                    if not self.seq_aside:
+                    if self.seq_frame_n_c3d > 1:
                         for idx_new in idx_next:
                             batch.append(idx_new)
 
@@ -250,12 +415,6 @@ class SamplerKITTI(Sampler):
 
     def __len__(self):
         if self.drop_last:
-            if self.seq_aside:
-                return sum( sub_size // self.batch_size for sub_size in self.sub_sizes.values() )
-            else:
-                return sum( sub_size * self.seq_frame_n // self.batch_size for sub_size in self.sub_sizes.values() )
+            return sum( sub_size * self.seq_frame_n_c3d // self.batch_size for sub_size in self.sub_sizes.values() )
         else:
-            if self.seq_aside: 
-                return sum( (sub_size + self.batch_size-1) // self.batch_size for sub_size in self.sub_sizes.values() )
-            else:
-                return sum( (sub_size * self.seq_frame_n + self.batch_size-1) // self.batch_size for sub_size in self.sub_sizes.values() )
+            return sum( (sub_size * self.seq_frame_n_c3d + self.batch_size-1) // self.batch_size for sub_size in self.sub_sizes.values() )

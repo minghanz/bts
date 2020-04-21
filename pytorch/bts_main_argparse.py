@@ -56,10 +56,14 @@ def parse_args_main():
     parser.add_argument('--c3d_weight',                type=float, help='weight for continuous 3D loss in back proped in training') # add by Minghan
     parser.add_argument('--silog_weight',              type=float, help='weight for si_log loss in back proped in training') # add by Minghan
     parser.add_argument('--pho_weight',                type=float, help='weight for photometric loss in back proped in training') # add by Minghan
-    parser.add_argument("--seq_frame_n",               type=int,   help="number of sequential frames in a mini-batch", default=1 )
+    parser.add_argument("--seq_frame_n_c3d",           type=int,   help="number of sequential frames for c3d loss (these frames are in the mini-batch)", default=1 )
+    parser.add_argument("--seq_frame_n_pho",           type=int,   help="number of sequential frames for pho loss (these frames aren't in the mini-batch)", default=1 )
     parser.add_argument("--batch_same_intr",                       help="whether a mini-batch should come from the same day (with the same intrinsics)", action='store_true' )
     parser.add_argument("--turn_off_dloss",            type=int,   help="turn off depth loss after how many epochs to alleviate problem at edges, -1 to never disable depth loss", default=-1 )
-    parser.add_argument("--seq_aside",                             help="whether the sequential frames are in mini-batch or aside from training data (used only for image reconstruction)", action='store_true' )
+    # parser.add_argument("--seq_aside",                             help="whether the sequential frames are in mini-batch or aside from training data (used only for image reconstruction)", action='store_true' )
+    parser.add_argument("--other_scale",               type=int,   help="scaling down original image to make photometric error easier", default=-1 )
+    parser.add_argument("--keep_velo",                             help="whether velodyne points should be kept in batch", action='store_true' )
+    parser.add_argument("--side_full_img",                         help="if true, the side images will not be cropped for better image wrapping", action='store_true' )
     
 
     # Preprocessing
