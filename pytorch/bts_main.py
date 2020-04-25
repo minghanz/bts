@@ -419,6 +419,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     steps_per_epoch = len(dataloader.data)
     num_total_steps = args.num_epochs * steps_per_epoch
     epoch = global_step // steps_per_epoch
+    depth_loss_decay_weight = 1
 
     if args.eval_time:
         timer = Timing()
@@ -554,7 +555,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             loss_total = 0
             use_dep_loss = args.turn_off_dloss <= 0 or epoch < args.turn_off_dloss
             if use_dep_loss:
-                loss_total += loss * args.silog_weight
+                loss_total += loss * args.silog_weight * depth_loss_decay_weight
                 loss_total -= inp * args.c3d_weight
             else:
                 loss_total -= inp * args.c3d_weight
@@ -715,6 +716,10 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             block_print()
             set_misc(model)
             enable_print()
+
+        if args.depth_weight_decay < 1 and args.depth_weight_decay > 0 :
+            depth_loss_decay_weight *= args.depth_weight_decay
+            print('depth_loss_decay_weight decayed, now:', depth_loss_decay_weight)
 
         epoch += 1
 
