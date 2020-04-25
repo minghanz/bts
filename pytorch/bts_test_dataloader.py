@@ -9,7 +9,7 @@ script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, "../../"))
 from c3d.utils.cam_proj import CamProj
 from c3d.utils.cam import lidar_to_depth
-from c3d.utils.vis import vis_depth_np, overlay_dep_on_rgb_np
+from c3d.utils.vis import vis_depth_np, overlay_dep_on_rgb_np, vis_depth, overlay_dep_on_rgb
 from c3d.utils.io import save_tensor_to_img
 
 def main_worker(args):
@@ -27,31 +27,35 @@ def main_worker(args):
         print('step', step)
 
 def process_batch(step, sample_batched):
-    # ## take out image, velo, cam_info
-    # ## project velo to image to test that the intrinsics are correct
-    # velo = sample_batched['velo']
-    # image = sample_batched['image_ori']
-    # cam_info = sample_batched['cam_info']
-    # batch_size = image.shape[0]
-    # for ib in range(batch_size):
-    #     depth_i_np = lidar_to_depth(velo[ib], cam_info.P_cam_li, K_unit=None, im_shape=(cam_info.height, cam_info.width), K_ready=cam_info.K[ib], torch_mode=True)
-    #     depth_vis_i_np = vis_depth_np(depth_i_np)
-    #     filename="{}_{}.jpg".format(step, ib)
-    #     dep_rgb_vis_i_np = overlay_dep_on_rgb_np(depth_vis_i_np, image[ib].cpu().numpy().transpose(1,2,0), path='vis_intr', name=filename )
+    ## take out image, velo, cam_info
+    ## project velo to image to test that the intrinsics are correct
+    velo = sample_batched['velo']
+    image = sample_batched['image_ori']
+    cam_info = sample_batched['cam_info']
+    depth_gt = sample_batched['depth']
+    batch_size = image.shape[0]
+    for ib in range(batch_size):
+        depth_i_np = lidar_to_depth(velo[ib], cam_info.P_cam_li, K_unit=None, im_shape=(cam_info.height, cam_info.width), K_ready=cam_info.K[ib], torch_mode=True)
+        depth_vis_i_np = vis_depth_np(depth_i_np)
+        filename="{}_{}.jpg".format(step, ib)
+        dep_rgb_vis_i_np = overlay_dep_on_rgb_np(depth_vis_i_np, image[ib].cpu().numpy().transpose(1,2,0), path='vis_intr', name=filename )
+        depth_vis_i = vis_depth(depth_gt[ib])
+        filename="{}_{}_dataset.jpg".format(step, ib)
+        dep_rgb_vis_i = overlay_dep_on_rgb(depth_vis_i, image[ib], path='vis_intr', name=filename )
         
-    # image_scaled = sample_batched['image_ori_scaled']
-    # cam_info_scaled = sample_batched['cam_info_scaled']
-    # for ib in range(batch_size):
-    #     depth_i_np = lidar_to_depth(velo[ib], cam_info_scaled.P_cam_li, K_unit=None, im_shape=(cam_info_scaled.height, cam_info_scaled.width), K_ready=cam_info_scaled.K[ib], torch_mode=True)
-    #     depth_vis_i_np = vis_depth_np(depth_i_np)
-    #     filename="{}_scaled_{}.jpg".format(step, ib)
-    #     dep_rgb_vis_i_np = overlay_dep_on_rgb_np(depth_vis_i_np, image_scaled[ib].cpu().numpy().transpose(1,2,0), path='vis_intr', name=filename )
+    image_scaled = sample_batched['image_ori_scaled']
+    cam_info_scaled = sample_batched['cam_info_scaled']
+    for ib in range(batch_size):
+        depth_i_np = lidar_to_depth(velo[ib], cam_info_scaled.P_cam_li, K_unit=None, im_shape=(cam_info_scaled.height, cam_info_scaled.width), K_ready=cam_info_scaled.K[ib], torch_mode=True)
+        depth_vis_i_np = vis_depth_np(depth_i_np)
+        filename="{}_scaled_{}.jpg".format(step, ib)
+        dep_rgb_vis_i_np = overlay_dep_on_rgb_np(depth_vis_i_np, image_scaled[ib].cpu().numpy().transpose(1,2,0), path='vis_intr', name=filename )
 
 
-    # ## visualize all inputs
-    # for iside in range(sample_batched['image_side_scaled'].shape[1]):
-    #     save_tensor_to_img(sample_batched['image_side_scaled'][:, iside], filename=os.path.join('vis_intr', '{}_{}_side_scaled'.format(step, iside)), mode='rgb')
-    #     save_tensor_to_img(sample_batched['image_side'][:, iside], filename=os.path.join('vis_intr', '{}_{}_side'.format(step, iside)), mode='rgb')
+    ## visualize all inputs
+    for iside in range(sample_batched['image_side_scaled'].shape[1]):
+        save_tensor_to_img(sample_batched['image_side_scaled'][:, iside], filename=os.path.join('vis_intr', '{}_{}_side_scaled'.format(step, iside)), mode='rgb')
+        save_tensor_to_img(sample_batched['image_side'][:, iside], filename=os.path.join('vis_intr', '{}_{}_side'.format(step, iside)), mode='rgb')
         
 
     ## check that scale-crop is the same as crop-scale

@@ -29,6 +29,8 @@ def parse_args_main():
     parser.add_argument('--input_width',               type=int,   help='input width',  default=640)
     parser.add_argument('--max_depth',                 type=float, help='maximum depth in estimation', default=10)
     parser.add_argument('--data_source',               type=str,   help='depth source, depth image (kitti_depth) or raw data (kitti_raw)', default='kitti_depth') # add by Minghan
+    parser.add_argument('--init_width',                type=float, help='rescale the width to what at the beginning after kb cropping', default=0)
+    parser.add_argument('--init_height',               type=float, help='rescale the height to what at the beginning after kb cropping', default=0)
 
     # Log and save
     parser.add_argument('--log_directory',             type=str,   help='directory to save checkpoints and summaries', default='')
@@ -84,6 +86,7 @@ def parse_args_main():
                                                                         'fastest way to use PyTorch for either single node or '
                                                                         'multi node data parallel training', action='store_true',)
     # Online eval
+    parser.add_argument('--eval_before_train',                     help='if set, perform online eval before the first training epoch', action='store_true')
     parser.add_argument('--do_online_eval',                        help='if set, perform online eval in every eval_freq steps', action='store_true')
     parser.add_argument('--data_path_eval',            type=str,   help='path to the data for online evaluation', required=False)
     parser.add_argument('--gt_path_eval',              type=str,   help='path to the groundtruth data for online evaluation', required=False)

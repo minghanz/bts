@@ -8,7 +8,8 @@ import numpy as np
 import sys, os
 script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, "../../"))
-from c3d.utils.cam import lidar_to_depth, scale_K, scale_from_size, crop_and_scale_K, scale_image
+from c3d.utils.cam import lidar_to_depth, scale_K, scale_from_size, crop_and_scale_K, scale_image, CamCrop, CamScale
+from c3d.utils.cam_proj import seq_ops_on_cam_info
 
 def scale_xy_crop(xy_crop, scale):
     apply_scale = 1 / scale
@@ -122,13 +123,13 @@ class Collate_Cfg:
                 if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
                     raise TypeError(self.default_collate_err_msg_format.format(elem.dtype))
 
-                return self.collate_common_crop([torch.as_tensor(b) for b in batch])
+                return self.collate_common_crop([torch.as_tensor(b, dtype=torch.float32) for b in batch])
             elif elem.shape == ():  # scalars
-                return torch.as_tensor(batch)
+                return torch.as_tensor(batch, dtype=torch.float32)
         elif isinstance(elem, float):
-            return torch.tensor(batch, dtype=torch.float64)
+            return torch.tensor(batch, dtype=torch.float32)
         elif isinstance(elem, int_classes):
-            return torch.tensor(batch)
+            return torch.tensor(batch, dtype=torch.float32)
         elif isinstance(elem, string_classes):
             return batch
         elif isinstance(elem, container_abcs.Mapping):
@@ -204,13 +205,25 @@ class Collate_Cfg:
                     if key not in ['image', 'depth', 'mask', 'mask_gt', 'image_ori', 'image_side', 'T_side', 'image_ori_scaled', 'image_side_scaled', 'velo']:
                         new_batch[key] = self.collate_common_crop([d[key] for d in batch])
 
+                ##################### cam_ops_list
+                cam_ops = new_batch['cam_ops']
+                cam_ops.append(CamCrop(w_start, h_start, self.net_input_width, self.net_input_height))
+                new_batch['cam_ops'] = cam_ops
+                if self.scale_img_needed:
+                    scale_cam_ops = cam_ops.copy()
+                    scale_cam_ops.append(CamScale(scale=scale, new_width=new_width, new_height=new_height, align_corner=False))
+                    new_batch['scale_cam_ops'] = scale_cam_ops
+
                 ##################### cam_info
                 date_side = (new_batch['date_str'][0], int(new_batch['side'][0]) )
-                cam_info = self.cam_proj.prepare_cam_info(date_side=date_side, xy_crop=new_batch['xy_crop'])
+                # cam_info = self.cam_proj.prepare_cam_info(date_side=date_side, xy_crop=new_batch['xy_crop'])
+                cam_info_ori = self.cam_proj.prepare_cam_info(date_side=date_side)
+                cam_info = seq_ops_on_cam_info(cam_info_ori, new_batch['cam_ops'])
                 new_batch['cam_info'] = cam_info
 
                 if self.scale_cam_info_needed:
-                    cam_info_scaled = cam_info.scale(new_width, new_height)
+                    # cam_info_scaled = cam_info.scale(new_width, new_height)
+                    cam_info_scaled = seq_ops_on_cam_info(cam_info_ori, new_batch['scale_cam_ops'])
                     new_batch['cam_info_scaled'] = cam_info_scaled
 
                 if self.scale_crop_needed:
@@ -247,15 +260,22 @@ class Collate_Cfg:
 
                 ##################### cam_info
                 date_side = (new_batch['date_str'][0], int(new_batch['side'][0]) )
-                cam_info = self.cam_proj.prepare_cam_info(date_side=date_side, xy_crop=new_batch['xy_crop'])
-                new_batch['cam_info'] = cam_info
+                # cam_info = self.cam_proj.prepare_cam_info(date_side=date_side, xy_crop=new_batch['xy_crop'])
+                cam_info = self.cam_proj.prepare_cam_info(date_side=date_side)
+                cam_ops_list = new_batch['cam_ops']
+                cam_info_main = seq_ops_on_cam_info(cam_info, cam_ops_list)
+                new_batch['cam_info'] = cam_info_main
                 
                 if self.scale_cam_info_needed:
-                    scale = 1 / self.other_scale
-                    new_width = self.net_input_width * scale
-                    new_height = self.net_input_height * scale
-                    cam_info_scaled = cam_info.scale(new_width, new_height)
+                    cam_ops_list_scale = new_batch['scale_cam_ops']
+                    cam_info_scaled = seq_ops_on_cam_info(cam_info, cam_ops_list_scale)
                     new_batch['cam_info_scaled'] = cam_info_scaled
+                    
+                    # scale = 1 / self.other_scale
+                    # new_width = self.net_input_width * scale
+                    # new_height = self.net_input_height * scale
+                    # cam_info_scaled = cam_info.scale(new_width, new_height)
+                    # new_batch['cam_info_scaled'] = cam_info_scaled
                 
                 ##################### scale xy_crop
                 if self.scale_crop_needed:

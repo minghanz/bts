@@ -204,6 +204,13 @@ def online_eval(model, dataloader_eval, gpu, ngpus):
 
             _, _, _, _, pred_depth, _ = model(image, focal)
 
+            ## rescale depth prediction to the same as original input (non-scaled)
+            if args.init_width > 0:
+                recover_to_width = gt_depth.shape[2]
+                recover_to_height = gt_depth.shape[1]
+                assert recover_to_height > 3 and recover_to_width > 3
+                pred_depth = scale_image(pred_depth, new_width=recover_to_width, new_height=recover_to_height, torch_mode=True, nearest=False, raw_float=True, align_corner=False)
+
             pred_depth = pred_depth.cpu().numpy().squeeze()
             gt_depth = gt_depth.cpu().numpy().squeeze()
 
@@ -422,6 +429,23 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     while epoch < args.num_epochs:
         if args.distributed:
             dataloader.train_sampler.set_epoch(epoch)
+
+        ## we can choose to do online_eval before any training to see the starting state, also to debug the online_eval module
+        if args.eval_before_train and epoch == 0:
+            if args.do_online_eval:
+                time.sleep(0.1)
+                model.eval()
+                eval_measures_raw = online_eval(model, dataloader_eval_raw, gpu, ngpus_per_node)
+                best_eval_measures_lower_better_raw, best_eval_measures_higher_better_raw, best_eval_steps_raw = log_eval(model, optimizer, 
+                                                                            eval_measures_raw, eval_summary_writer_raw, global_step, 'raw', best_eval_measures_lower_better_raw, best_eval_measures_higher_better_raw, best_eval_steps_raw)
+                eval_measures_dep = online_eval(model, dataloader_eval_dep, gpu, ngpus_per_node)
+                best_eval_measures_lower_better_dep, best_eval_measures_higher_better_dep, best_eval_steps_dep = log_eval(model, optimizer, 
+                                                                            eval_measures_dep, eval_summary_writer_dep, global_step, 'dep', best_eval_measures_lower_better_dep, best_eval_measures_higher_better_dep, best_eval_steps_dep)
+                model.train()
+                block_print()
+                set_misc(model)
+                enable_print()
+        #######################################################################################################################
 
         for step, sample_batched in enumerate(dataloader.data):
             if args.eval_time:
