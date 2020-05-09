@@ -206,11 +206,12 @@ def online_eval(model, dataloader_eval, gpu, ngpus):
 
             ## rescale depth prediction to the same as original input (non-scaled)
             if args.init_width > 0:
-                recover_to_width = gt_depth.shape[2]
-                recover_to_height = gt_depth.shape[1]
+                recover_to_width = gt_depth.shape[3]
+                recover_to_height = gt_depth.shape[2]
                 assert recover_to_height > 3 and recover_to_width > 3
                 pred_depth = scale_image(pred_depth, new_width=recover_to_width, new_height=recover_to_height, torch_mode=True, nearest=False, raw_float=True, align_corner=False)
 
+            ## remove the batch dim and channel dim
             pred_depth = pred_depth.cpu().numpy().squeeze()
             gt_depth = gt_depth.cpu().numpy().squeeze()
 
@@ -403,6 +404,8 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             eval_summary_writer_dep = SummaryWriter(writer_path+"_eval_dep", flush_secs=30)
 
     silog_criterion = silog_loss(variance_focus=args.variance_focus)
+    ### opt to use l1 loss for depth prediction
+    dep_l1_criterion = depth_l1_loss(inbalance_to_closer=args.inbalance_to_closer)
 
     start_time = time.time()
     duration = 0
@@ -468,6 +471,11 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                 if args.gpu_sync:
                     timer.log_cuda_sync()
                 timer.log('after_model', 3)
+
+            ########### check where nan occurs
+            lpg_dvd_min_8 = model.module.decoder.lpg8x8.abs_min # model is wrapped in DataParallel, so need to add .module to get original class attributes
+            lpg_dvd_min_4 = model.module.decoder.lpg4x4.abs_min
+            lpg_dvd_min_2 = model.module.decoder.lpg2x2.abs_min
 
             # ## prepare CamInfo object for c3d and pho error calculation
             # date_side = (sample_batched['date_str'], sample_batched['side'])
@@ -543,7 +551,10 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
  
             ## depth error calculation
             # loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
-            loss = silog_criterion.forward(depth_est, depth_gt, depth_gt_mask)
+            if not args.use_l1_loss:
+                loss = silog_criterion.forward(depth_est, depth_gt, depth_gt_mask)
+            else:
+                loss = dep_l1_criterion.forward(depth_est, depth_gt, depth_gt_mask)
             # loss.backward()
 
             if args.eval_time:
@@ -598,7 +609,8 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                     mask = depth_gt_mask
                     print('depth_est[mask].min(), max(): {}, {}'.format(depth_est[mask].min(), depth_est[mask].max() ))
                     print('depth_gt[mask].min(), max(): {}, {}'.format(depth_gt[mask].min(), depth_gt[mask].max() ))
-                    print('iconv1[mask].min(), max(): {}, {}'.format(iconv1[mask].min(), iconv1[mask].max() ))
+                    iconv1_masked = iconv1[mask.expand_as(iconv1)]
+                    print('iconv1[mask].min(), max(): {}, {}'.format(iconv1_masked.min(), iconv1_masked.max() ))
                     print('log(depth_est[mask].min(), max()): {}, {}'.format(torch.log(depth_est[mask]).min(), torch.log(depth_est[mask]).max() ))
                     print('log(depth_gt[mask].min(), max()): {}, {}'.format(torch.log(depth_gt[mask]).min(), torch.log(depth_gt[mask]).max() ))
                     print('depth_est.min(), max(): {}, {}'.format(depth_est.min(), depth_est.max() ))
@@ -631,6 +643,10 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                     writer.add_scalar('c3d inp', inp, global_step) # cvo logging
                     writer.add_scalar('loss_total', loss_total, global_step) # cvo logging
                     writer.add_scalar('pho_loss', pho_loss, global_step) # cvo logging
+                    ############ monitor nan
+                    writer.add_scalar('lpg_dvd_min_8', lpg_dvd_min_8, global_step)
+                    writer.add_scalar('lpg_dvd_min_4', lpg_dvd_min_4, global_step)
+                    writer.add_scalar('lpg_dvd_min_2', lpg_dvd_min_2, global_step)
                     # depth_gt = torch.where(depth_gt < 1e-3, depth_gt * 0 + 1e3, depth_gt)
                     batch_size_cur = depth_gt.shape[0]  # this fixes a bug which may not always occur because it happenss only when the logging iteration (once every args.log_freq) happens to be the last mini-batch in a epoch.
                     for i in range(batch_size_cur):

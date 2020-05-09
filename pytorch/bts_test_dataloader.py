@@ -8,25 +8,116 @@ import sys, os
 script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, "../../"))
 from c3d.utils.cam_proj import CamProj
+from c3d.c3d_loss import C3DLoss
 from c3d.utils.cam import lidar_to_depth
-from c3d.utils.vis import vis_depth_np, overlay_dep_on_rgb_np, vis_depth, overlay_dep_on_rgb
+from c3d.utils.vis import vis_depth_np, overlay_dep_on_rgb_np, vis_depth, overlay_dep_on_rgb, dep_img_bw, vis_depth_err, uint8_np_from_img_tensor, vis_pts_dist, comment_on_img
 from c3d.utils.io import save_tensor_to_img
 
-def main_worker(args):
+inv_normalize = transforms.Normalize(
+    mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
+    std=[1/0.229, 1/0.224, 1/0.225]
+)
+def main_worker(args, args_rest):
     ## set manual seed to make it reproducible
     torch.manual_seed(0)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     np.random.seed(0)
 
+    # mode = 'train'
+    mode = 'online_eval'
+    ## input
     cam_proj_model = CamProj(args.data_path, batch_size=args.batch_size)
-    dataloader = BtsDataLoader(args, 'train', cam_proj=cam_proj_model)
+    if mode == 'train':
+        dataloader = BtsDataLoader(args, 'train', cam_proj=cam_proj_model)
+    else:
+        dataloader = BtsDataLoader(args, 'online_eval', data_source='kitti_depth', cam_proj=cam_proj_model)
+
+    ## model
+    model = BtsModel(params=args)
+    model = torch.nn.DataParallel(model)
+    checkpoint = torch.load(args.checkpoint_path)
+    model.load_state_dict(checkpoint['model'])
+    model.eval()
+    model.cuda()
+
+    # C3D module
+    c3d_model = C3DLoss(seq_frame_n=args.seq_frame_n_c3d)
+    c3d_model.parse_opts(args_rest)
+    c3d_model.cuda()
     
     for step, sample_batched in enumerate(dataloader.data):
-        process_batch(step, sample_batched)
+        # batch_vis_input(step, sample_batched)
+        # batch_vis_input_eval(step, sample_batched)
+        batch_vis_output(step, sample_batched, model, mode=mode, c3d_model=c3d_model)
         print('step', step)
 
-def process_batch(step, sample_batched):
+def batch_vis_output(step, sample_batched, model, mode, c3d_model=None):
+    ## input
+    image = sample_batched['image'].cuda()
+    focal = sample_batched['focal'].cuda()
+    ## Predict
+    lpg8x8, lpg4x4, lpg2x2, reduc1x1, depth_est, _ = model(image, focal)
+
+    ## scale the image and depth estimation to have the same size as depth_gt
+    depth_gt = sample_batched['depth'].cuda()
+    if mode == 'online_eval':
+        has_valid_depth = sample_batched['has_valid_depth']
+        if not has_valid_depth:
+            # print('Invalid depth. continue.')
+            return
+        depth_est = scale_image(depth_est, depth_gt.shape[3], depth_gt.shape[2], torch_mode=True, nearest=False, raw_float=True, align_corner=False)
+        image = scale_image(image, depth_gt.shape[3], depth_gt.shape[2], torch_mode=True, nearest=False, raw_float=True, align_corner=False)
+
+    batch_size = image.shape[0]
+    batch_vis_depth_diff(batch_size, step, image, depth_est, depth_gt)
+    # batch_vis_pts_dist(batch_size, step, image, depth_est, depth_gt, sample_batched, c3d_model)
+
+def batch_vis_depth_diff(batch_size, step, image, depth_est, depth_gt):
+    '''visualize the difference in depth estimation ang GT'''
+    for ib in range(batch_size):
+        dep_diff = vis_depth_err(depth_est[ib], depth_gt[ib])
+        # dep_diff = np.ones_like(dep_diff)*255
+        filename="{}_{}.jpg".format(step, ib)
+        unnormalized_img_i = inv_normalize(image[ib])
+        img_vis_i = uint8_np_from_img_tensor(unnormalized_img_i)
+        dep_rgb_vis_i_np = overlay_dep_on_rgb_np(dep_diff, img_vis_i, path='vis_intr_dep_c3d', name=filename )
+
+def batch_vis_pts_dist(batch_size, step, image, depth_est, depth_gt, sample_batched, c3d_model):
+    
+    cam_info = sample_batched['cam_info'].cuda()
+    depth_mask = sample_batched['mask'].cuda(args.gpu, non_blocking=True)
+    depth_gt_mask = sample_batched['mask_gt'].cuda(args.gpu, non_blocking=True)
+
+    inp = c3d_model(image, depth_est, depth_gt, depth_mask, depth_gt_mask, cam_info ) 
+    dist_stat = c3d_model.pc3ds["gt"].grid.feature['dist_stat']
+
+    for ib in range(batch_size):
+        unnormalized_img_i = inv_normalize(image[ib])
+        img_vis_i = uint8_np_from_img_tensor(unnormalized_img_i)
+
+        img_min, img_max, img_mean, scale_min, scale_max, scale_mean = vis_pts_dist(dist_stat[ib])
+        dep_rgb_vis_i_np = overlay_dep_on_rgb_np(img_min, comment_on_img(img_vis_i, item_name='min', num=scale_min), path='vis_intr', name="{}_{}_min.jpg".format(step, ib) )
+        dep_rgb_vis_i_np = overlay_dep_on_rgb_np(img_max, comment_on_img(img_vis_i, item_name='max', num=scale_max), path='vis_intr', name="{}_{}_max.jpg".format(step, ib) )
+        dep_rgb_vis_i_np = overlay_dep_on_rgb_np(img_mean, comment_on_img(img_vis_i, item_name='mean', num=scale_mean), path='vis_intr', name="{}_{}_mean.jpg".format(step, ib) )
+        
+
+def batch_vis_input_eval(step, sample_batched):
+    depth_gt = sample_batched['depth']
+    image = sample_batched['image']
+    has_valid_depth = sample_batched['has_valid_depth']
+    batch_size = image.shape[0]
+    for ib in range(batch_size):
+        if has_valid_depth[ib] == False:
+            continue
+        unnormalized_img_i = inv_normalize(image[ib])
+        depth_vis_i = vis_depth(depth_gt[ib])
+        filename="{}_{}.jpg".format(step, ib)
+        dep_rgb_vis_i = overlay_dep_on_rgb(depth_vis_i, unnormalized_img_i, path='vis_intr', name=filename, overlay=False)
+        # filename_bw="{}_{}_bw.png".format(step, ib)
+        # dep_img_bw(depth_vis_i, path='vis_intr', name=filename_bw)
+
+def batch_vis_input(step, sample_batched):
     ## take out image, velo, cam_info
     ## project velo to image to test that the intrinsics are correct
     velo = sample_batched['velo']
@@ -122,4 +213,4 @@ if __name__ == '__main__':
     torch.cuda.empty_cache()
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
-    main_worker(args)
+    main_worker(args, args_rest)

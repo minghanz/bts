@@ -37,7 +37,7 @@ from c3d.utils.cam import lidar_to_depth, scale_K, scale_from_size, crop_and_sca
 
 import re
 
-from check_neighbor import process_line
+from kitti_split_processing import process_line
 
 def _is_pil_image(img):
     return isinstance(img, Image.Image)
@@ -391,7 +391,12 @@ class DataLoadPreprocess(Dataset):
 
             ## cropping, rotation augmentations
             image, op_params = self.image_process(image, mode='img', need_mask=False, op_params=None, cam_ops_list=cam_ops)
-            depth_gt, mask_gt, mask = self.image_process(depth_gt, mode='dep', need_mask=True, op_params=op_params, lidar_combo=(velo, extr_cam_li, K_unit))
+            if self.data_source == 'kitti_depth':
+                depth_gt, mask_gt, mask = self.image_process(depth_gt, mode='dep', need_mask=True, op_params=op_params)
+            elif self.data_source == 'kitti_raw':
+                depth_gt, mask_gt, mask = self.image_process(depth_gt, mode='dep', need_mask=True, op_params=op_params, lidar_combo=(velo, extr_cam_li, K_unit))
+            else:
+                raise ValueError("self.data_source not recognized")
             xy_crop = op_params['xy_crop']
             # xy_crop = (x_start, y_start, x_size, y_size)
 
@@ -688,14 +693,20 @@ class ToTensor(object):
         mask = sample['mask']
         mask_gt = sample['mask_gt']
 
-        if self.mode == 'train':
+        if depth is not False:
             depth = self.to_tensor(depth)
             mask = self.to_tensor(mask)
             mask_gt = self.to_tensor(mask_gt)
+        new_batch.update({'depth': depth, 'mask': mask, 'mask_gt': mask_gt})
+
+        if self.mode == 'train':
+            # depth = self.to_tensor(depth)
+            # mask = self.to_tensor(mask)
+            # mask_gt = self.to_tensor(mask_gt)
 
             image_ori = self.to_tensor(sample['image_ori'])
 
-            new_batch.update({'depth': depth, 'mask': mask, 'mask_gt': mask_gt, 'image_ori': image_ori })
+            new_batch.update({'image_ori': image_ori })
 
             if 'image_side' in sample:
                 ## there are neighboring images to process
@@ -716,11 +727,7 @@ class ToTensor(object):
             if 'velo' in sample:
                 new_batch.update({'velo': torch.from_numpy(sample['velo']) })
 
-            return new_batch
-        else:
-            new_batch.update({'depth': depth, 'mask': mask, 'mask_gt': mask_gt})
-
-            return new_batch
+        return new_batch
     
     def to_tensor(self, pic):
         if not (_is_pil_image(pic) or _is_numpy_image(pic)):

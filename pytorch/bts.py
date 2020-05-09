@@ -47,6 +47,20 @@ class silog_loss(nn.Module):
         d = torch.log(depth_est[mask]) - torch.log(depth_gt[mask])
         return torch.sqrt((d ** 2).mean() - self.variance_focus * (d.mean() ** 2)) * 10.0
 
+class depth_l1_loss(nn.Module):
+    def __init__(self, inbalance_to_closer):
+        super(depth_l1_loss, self).__init__()
+        self.inbalance_to_closer = inbalance_to_closer
+    def forward(self, depth_est, depth_gt, mask):
+        if not self.inbalance_to_closer:
+            d = torch.abs(depth_est[mask] - depth_gt[mask]).mean()
+        else:
+            err = depth_est[mask] - depth_gt[mask]
+            err_pos = 2 * err[err>0]
+            err_neg = -err[err<0]
+            total_num = err.numel() # mask.sum().to(dtype=torch.float32)+1e-8
+            d = (err_pos.sum() + err_neg.sum()) / total_num
+        return d
 
 class atrous_conv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation, apply_bn_first=True):
@@ -129,6 +143,9 @@ class local_planar_guidance(nn.Module):
         self.v = torch.arange(int(self.upratio)).reshape([1, self.upratio, 1]).float()
         self.upratio = float(upratio)
 
+        ### check nan
+        self.abs_min = None
+
     def forward(self, plane_eq, focal):
         plane_eq_expanded = torch.repeat_interleave(plane_eq, int(self.upratio), 2)
         plane_eq_expanded = torch.repeat_interleave(plane_eq_expanded, int(self.upratio), 3)
@@ -143,7 +160,17 @@ class local_planar_guidance(nn.Module):
         v = self.v.repeat(plane_eq.size(0), plane_eq.size(2), plane_eq.size(3) * int(self.upratio)).cuda()
         v = (v - (self.upratio - 1) * 0.5) / self.upratio
 
-        return n4 / (n1 * u + n2 * v + n3)
+        # return n4 / (n1 * u + n2 * v + n3)
+
+        # ### Minghan: maybe the nan is here? 
+        divided = n1 * u + n2 * v + n3
+        self.abs_min = torch.abs(divided).min()
+        # eps = 1e-5
+        # dummy_eps = torch.ones_like(divided) * eps
+        # divided = torch.where(divided > 0 and divided < eps, dummy_eps, divided )
+        # divided = torch.where(divided < 0 and divided > -eps, -dummy_eps, divided )
+
+        return n4 / divided
 
 class bts(nn.Module):
     def __init__(self, params, feat_out_channels, num_features=512):
