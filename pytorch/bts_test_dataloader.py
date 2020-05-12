@@ -10,8 +10,7 @@ sys.path.append(os.path.join(script_path, "../../"))
 from c3d.utils.cam_proj import CamProj
 from c3d.c3d_loss import C3DLoss
 from c3d.utils.cam import lidar_to_depth
-from c3d.utils.vis import vis_depth_np, overlay_dep_on_rgb_np, vis_depth, overlay_dep_on_rgb, dep_img_bw, vis_depth_err, uint8_np_from_img_tensor, vis_pts_dist, comment_on_img
-from c3d.utils.io import save_tensor_to_img
+from c3d.utils_general.vis import vis_depth_np, overlay_dep_on_rgb_np, vis_depth, overlay_dep_on_rgb, dep_img_bw, vis_depth_err, uint8_np_from_img_tensor, vis_pts_dist, comment_on_img, save_np_to_img
 
 inv_normalize = transforms.Normalize(
     mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
@@ -145,9 +144,12 @@ def batch_vis_input(step, sample_batched):
 
     ## visualize all inputs
     for iside in range(sample_batched['image_side_scaled'].shape[1]):
-        save_tensor_to_img(sample_batched['image_side_scaled'][:, iside], filename=os.path.join('vis_intr', '{}_{}_side_scaled'.format(step, iside)), mode='rgb')
-        save_tensor_to_img(sample_batched['image_side'][:, iside], filename=os.path.join('vis_intr', '{}_{}_side'.format(step, iside)), mode='rgb')
-        
+        np_img_batch = uint8_np_from_img_tensor(sample_batched['image_side_scaled'][:, iside])
+        save_np_to_img(np_img_batch, filename=os.path.join('vis_intr', '{}_{}_side_scaled_rgb'.format(step, iside)) )
+        np_img_batch = uint8_np_from_img_tensor(sample_batched['image_side'][:, iside])
+        save_np_to_img(np_img_batch, filename=os.path.join('vis_intr', '{}_{}_side_rgb'.format(step, iside)) )
+
+        ### save_tensor_to_img is deprecated
 
     ## check that scale-crop is the same as crop-scale
     xy_crop = sample_batched['xy_crop']
@@ -197,8 +199,12 @@ def batch_vis_input(step, sample_batched):
         side_crop_scales.append(side_crop_scale)
     side_scale_crops = torch.stack(side_scale_crops, dim=0)
     side_crop_scales = torch.stack(side_crop_scales, dim=0)
-    save_tensor_to_img(side_scale_crops, filename=os.path.join('vis_intr', '{}_side_scaled_crop'.format(step)), mode='rgb')
-    save_tensor_to_img(side_crop_scales, filename=os.path.join('vis_intr', '{}_side_crop_scaled'.format(step)), mode='rgb')
+    
+    ### save_tensor_to_img is deprecated
+    np_img_batch = uint8_np_from_img_tensor(side_scale_crops)
+    save_np_to_img(np_img_batch, filename=os.path.join('vis_intr', '{}_side_scaled_crop_rgb'.format(step)) )
+    np_img_batch = uint8_np_from_img_tensor(side_crop_scales)
+    save_np_to_img(np_img_batch, filename=os.path.join('vis_intr', '{}_side_crop_scaled_rgb'.format(step)) )
 
         
 

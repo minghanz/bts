@@ -165,10 +165,10 @@ class local_planar_guidance(nn.Module):
         # ### Minghan: maybe the nan is here? 
         divided = n1 * u + n2 * v + n3
         self.abs_min = torch.abs(divided).min()
-        # eps = 1e-5
-        # dummy_eps = torch.ones_like(divided) * eps
-        # divided = torch.where(divided > 0 and divided < eps, dummy_eps, divided )
-        # divided = torch.where(divided < 0 and divided > -eps, -dummy_eps, divided )
+        eps = 1e-3
+        dummy_eps = torch.ones_like(divided) * eps
+        divided = torch.where((divided > 0) & (divided < eps), dummy_eps, divided )
+        divided = torch.where((divided < 0) & (divided > -eps), -dummy_eps, divided )
 
         return n4 / divided
 

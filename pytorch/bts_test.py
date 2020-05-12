@@ -36,19 +36,12 @@ from bts_dataloader import *
 
 import sys
 script_path = os.path.dirname(__file__)
-sys.path.append(os.path.join(script_path, '../../monodepth2'))
-from cvo_utils import NormalFromDepthDense
+sys.path.append(os.path.join(script_path, '../../'))
+from c3d.utils.geometry import NormalFromDepthDense
+from c3d.utils_general.argparse_f import init_argparser_f
+from c3d.utils_general.vis import uint8_np_from_img_np, save_np_to_img, uint8_np_from_img_tensor, vis_depth_np
 
-
-def convert_arg_line_to_args(arg_line):
-    for arg in arg_line.split():
-        if not arg.strip():
-            continue
-        yield arg
-
-
-parser = argparse.ArgumentParser(description='BTS PyTorch implementation.', fromfile_prefix_chars='@')
-parser.convert_arg_line_to_args = convert_arg_line_to_args
+parser = init_argparser_f(description='BTS Pytorch test.')
 
 parser.add_argument('--model_name', type=str, help='model name', default='bts_nyu_v2')
 parser.add_argument('--encoder', type=str, help='type of encoder, vgg or desenet121_bts or densenet161_bts',
@@ -65,6 +58,8 @@ parser.add_argument('--save_lpg', help='if set, save outputs from lpg layers', a
 parser.add_argument('--bts_size', type=int,   help='initial num_filters in bts', default=512)
 parser.add_argument('--save_np', help='if set, save outputs in npy file', action='store_true')
 parser.add_argument('--save_normal', help='if set, save disp and normal outputs in png file', action='store_true')
+parser.add_argument('--init_width',                type=float, help='rescale the width to what at the beginning after kb cropping', default=0)
+parser.add_argument('--init_height',               type=float, help='rescale the height to what at the beginning after kb cropping', default=0)
 
 if sys.argv.__len__() == 2:
     arg_filename_with_prefix = '@' + sys.argv[1]
@@ -86,27 +81,6 @@ def get_num_lines(file_path):
     lines = f.readlines()
     f.close()
     return len(lines)
-
-def save_np_to_img(nparray, filename, mode):
-    """Input is C*H*W or H*W"""
-    # nparray = tsor.cpu().detach().numpy()
-    if "rgb" in mode:
-        nparray = nparray.transpose(1,2,0)
-        nparray = (nparray * 255).astype(np.uint8)
-        Imode = "RGB"
-    elif "dep" in mode: # H*W
-        nparray = (nparray /nparray.max() * 255).astype(np.uint8)
-        # nparray = (nparray[:,:,:,0] * 255).astype(np.uint8) # disable normalization since disp is already in [0, 1]
-        Imode = "L"
-    elif "nml" in mode:
-        nparray = nparray.transpose(1,2,0)
-        nparray = (nparray * 255).astype(np.uint8)
-        Imode = "RGB"
-    else:
-        raise ValueError("mode {} not recognized".format(mode))
-    # for ib in range(nparray.shape[0]):
-    img = Image.fromarray(nparray, mode=Imode)
-    img.save("{}_{}.png".format(filename, mode))
 
 def test(params):
     """Test function."""
@@ -156,7 +130,7 @@ def test(params):
             image = Variable(sample['image'].cuda())
             focal = Variable(sample['focal'].cuda())
             # Predict
-            lpg8x8, lpg4x4, lpg2x2, reduc1x1, depth_est = model(image, focal)
+            lpg8x8, lpg4x4, lpg2x2, reduc1x1, depth_est, _ = model(image, focal)
             pred_depths.append(depth_est.cpu().numpy().squeeze())
             pred_8x8s.append(lpg8x8[0].cpu().numpy().squeeze())
             pred_4x4s.append(lpg4x4[0].cpu().numpy().squeeze())
@@ -166,29 +140,30 @@ def test(params):
             if args.save_normal:
                 # print("depth_est.shape", depth_est.shape)
                 normal = normal_model(depth_est, K) *0.5 + 0.5
-                normals.append(normal.cpu().numpy().squeeze())
+                normals.append(uint8_np_from_img_tensor(normal))
 
 
     elapsed_time = time.time() - start_time
     print('Elapesed time: %s' % str(elapsed_time))
     print('Done.')
     
-    save_name = 'result_' + args.model_name + args.dataset
+    # save_name = 'result_' + args.model_name + args.dataset
+    save_name = os.path.join('result_' + args.dataset, args.checkpoint_path)
 
     if args.save_np:
         depth_stack = np.stack(pred_depths)
-        output_path = "{}.npy".format(save_name)
+        output_path = os.path.join(save_name, "depth_preds.npy")
         np.save(output_path, depth_stack)
         return
     
     print('Saving result pngs..')
     if not os.path.exists(os.path.dirname(save_name)):
         try:
-            os.mkdir(save_name)
-            os.mkdir(save_name + '/raw')
-            os.mkdir(save_name + '/cmap')
-            os.mkdir(save_name + '/rgb')
-            os.mkdir(save_name + '/gt')
+            os.makedirs(save_name)
+            os.makedirs(save_name + '/raw')
+            os.makedirs(save_name + '/cmap')
+            os.makedirs(save_name + '/rgb')
+            os.makedirs(save_name + '/gt')
         except OSError as e:
             if e.errno != errno.EEXIST:
                 raise
@@ -238,14 +213,12 @@ def test(params):
 
         if args.save_normal:
             ######### here we want to process each numpy array of depth (H*W) and normal (C*H*W) and save them
-            ### depth image: change to inverse depth
-            min_depth=2
-            max_depth=80
-            pred_depth_clamped = np.clip(pred_depth, min_depth, None)
-            pred_disp_clamped = 1/pred_depth_clamped
-            save_np_to_img(pred_disp_clamped, filename_pred_png, "dep")
+            pred_depth_inv = vis_depth_np(pred_depth)
             normal = normals[s]
-            save_np_to_img(normal, filename_pred_png, "nml")
+
+            pred_depth_inv = uint8_np_from_img_np(pred_depth_inv)
+            save_np_to_img(pred_depth_inv, filename_pred_png.replace('.png', '')+'_depinv')
+            save_np_to_img(normal, filename_pred_png.replace('.png', '')+'nml')
 
 
         

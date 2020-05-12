@@ -48,9 +48,9 @@ sys.path.append(os.path.join(script_path, "../../"))
 from c3d.utils.cam_proj import CamProj
 from c3d.c3d_loss import C3DLoss
 from c3d.pho_loss import PhoLoss
-from c3d.utils.io import save_tensor_to_img
-from c3d.utils.vis import vis_normal, vis_depth, overlay_dep_on_rgb
-from c3d.utils.timing import Timing
+# from c3d.utils.io import save_tensor_to_img???
+from c3d.utils_general.vis import vis_normal, vis_depth, overlay_dep_on_rgb, uint8_np_from_img_tensor, save_np_to_img
+from c3d.utils_general.timing import Timing
 from c3d.utils.cam import scale_image
 
 # from bts_utils import vis_depth, overlay_dep_on_rgb
@@ -544,10 +544,12 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             # else:
             #     mask = depth_gt > 1.0
 
-            #### can see that the mask_gt is (at least visually) the same as mask generated above. 
-            # save_tensor_to_img(depth_mask, os.path.join(args.log_directory, args.model_name, '{}_pred'.format(global_step) ), 'mask')
-            # save_tensor_to_img(depth_gt_mask, os.path.join(args.log_directory, args.model_name, '{}_gt'.format(global_step) ), 'mask')
-            # save_tensor_to_img(mask, os.path.join(args.log_directory, args.model_name, '{}_ori'.format(global_step) ), 'mask')
+            # ### can see that the mask_gt is (at least visually) the same as mask generated above. 
+            # ## save_tensor_to_img is deprecated, use uint8_np_from_img_tensor and save_np_to_img instead
+            # save_np_to_img(uint8_np_from_img_tensor(depth_mask), os.path.join(args.log_directory, args.model_name, '{}_pred_mask'.format(global_step)) )
+            # save_np_to_img(uint8_np_from_img_tensor(depth_gt_mask), os.path.join(args.log_directory, args.model_name, '{}_gt_mask'.format(global_step)) )
+            # # save_np_to_img(uint8_np_from_img_tensor(mask), os.path.join(args.log_directory, args.model_name, '{}_ori_mask'.format(global_step)) )
+
  
             ## depth error calculation
             # loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))

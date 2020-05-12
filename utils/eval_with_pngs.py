@@ -24,16 +24,12 @@ import numpy as np
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
+import sys
+script_path = os.path.dirname(__file__)
+sys.path.append(os.path.join(script_path, '../../'))
+from c3d.utils_general.argparse_f import init_argparser_f
 
-def convert_arg_line_to_args(arg_line):
-    for arg in arg_line.split():
-        if not arg.strip():
-            continue
-        yield arg
-
-
-parser = argparse.ArgumentParser(description='BTS TensorFlow implementation.', fromfile_prefix_chars='@')
-parser.convert_arg_line_to_args = convert_arg_line_to_args
+parser = init_argparser_f(description='BTS Pytorch eval.')
 
 parser.add_argument('--pred_path',           type=str,   help='path to the prediction results in png', required=True)
 parser.add_argument('--gt_path',             type=str,   help='root path to the groundtruth data', required=False)
@@ -45,8 +41,15 @@ parser.add_argument('--max_depth_eval',      type=float, help='maximum depth for
 parser.add_argument('--do_kb_crop',                      help='if set, crop input images as kitti benchmark images', action='store_true')
 
 parser.add_argument('--filenames_file', type=str, help='path to the filenames text file', required=False)
-args = parser.parse_args()
-
+# args = parser.parse_args()
+if sys.argv.__len__() == 2:
+    if sys.argv[1][0] != '@':
+        arg_filename_with_prefix = '@' + sys.argv[1]
+    else:
+        arg_filename_with_prefix = sys.argv[1]
+    args = parser.parse_args([arg_filename_with_prefix])
+else:
+    args = parser.parse_args()
 
 def compute_errors(gt, pred):
 
@@ -83,6 +86,7 @@ def test():
     missing_ids = set()
     pred_filenames = []
 
+    ############### pred_filenames
     if args.dataset != "vkitti":
         for root, dirnames, filenames in os.walk(args.pred_path):
             for pred_filename in fnmatch.filter(filenames, '*.png'):
@@ -109,6 +113,7 @@ def test():
 
     pred_depths = []
 
+    ############### pred_depths
     for i in range(num_test_samples):
         pred_depth_path = os.path.join(args.pred_path, pred_filenames[i])
         pred_depth = cv2.imread(pred_depth_path, -1)
@@ -129,12 +134,14 @@ def test():
     print('Raw png files reading done')
     print('Evaluating {} files'.format(len(pred_depths)))
 
+    ############### gt_depths and missing_ids
     if args.dataset == 'kitti':
         for t_id in range(num_test_samples):
             file_dir = pred_filenames[t_id].split('.')[0]
             filename = file_dir.split('_')[-1]
             directory = file_dir.replace('_' + filename, '')
-            gt_depth_path = os.path.join(args.gt_path, directory, 'proj_depth/groundtruth/image_02', filename + '.png')
+            date = directory[:10]
+            gt_depth_path = os.path.join(args.gt_path, date, directory, 'proj_depth/groundtruth/image_02', filename + '.png')
             depth = cv2.imread(gt_depth_path, -1)
             if depth is None:
                 print('Missing: %s ' % gt_depth_path)

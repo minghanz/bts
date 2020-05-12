@@ -1,19 +1,10 @@
 import argparse
 import sys
 
-def convert_arg_line_to_args(arg_line):
-    if len(arg_line) < 1:
-        return
-    if arg_line[0] == "#":
-        return
-    for arg in arg_line.split():
-        if not arg.strip():
-            continue
-        yield arg
+from c3d.utils_general.argparse_f import init_argparser_f
 
 def parse_args_main():
-    parser = argparse.ArgumentParser(description='BTS PyTorch implementation.', fromfile_prefix_chars='@')
-    parser.convert_arg_line_to_args = convert_arg_line_to_args
+    parser = init_argparser_f(description='BTS Pytorch train.')
 
     parser.add_argument('--mode',                      type=str,   help='train or test', default='train')
     parser.add_argument('--model_name',                type=str,   help='model name', default='bts_eigen_v2')

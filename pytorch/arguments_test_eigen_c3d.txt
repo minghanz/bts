@@ -1,0 +1,23 @@
+# compare with arguments_eval_***,txt
+# make sure that: 
+# checkpoint_path and pred_path is consistent
+# dataset, max_depth, do_kb_crop is consistent
+
+### dataset settings
+--data_path /media/sda1/minghanz/datasets/kitti/kitti_data/
+--filenames_file ../train_test_inputs/eigen_test_files_with_gt_jpg_fullpath.txt
+--dataset kitti
+
+### model settings
+--model_name bts
+--encoder densenet161_bts
+--checkpoint_path ./models/bts_eigen_v2_pytorch_test/Mon_May__4_20:41:07_2020/model-180700
+
+### io format settings
+--input_height 352
+--input_width 1216
+# --init_width 
+# --init_height 
+--max_depth 80
+--do_kb_crop
+# --save_normal

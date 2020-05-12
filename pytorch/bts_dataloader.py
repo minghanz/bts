@@ -159,10 +159,11 @@ class DataLoadPreprocess(Dataset):
 
         self.regex_dep2lid = re.compile('.+?sync')
 
-        if data_source is None:
-            self.data_source = self.args.data_source
-        else:
-            self.data_source = data_source
+        if mode != 'test':  # in test mode, data_source is not used
+            if data_source is None:
+                self.data_source = self.args.data_source
+            else:
+                self.data_source = data_source
     
     def image_process(self, image, mode, need_mask=False, need_crop=True, op_params=None, cam_ops_list=None, lidar_combo=None):
         '''
