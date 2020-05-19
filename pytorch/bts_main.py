@@ -206,6 +206,9 @@ def online_eval(model, dataloader_eval, gpu, ngpus):
 
             ## rescale depth prediction to the same as original input (non-scaled)
             if args.init_width > 0:
+                # ### if change to be consistent to bts_test.py, we do not crop gt_depth in dataloader in online_eval mode
+                # recover_to_width = 1216
+                # recover_to_height = 352
                 recover_to_width = gt_depth.shape[3]
                 recover_to_height = gt_depth.shape[2]
                 assert recover_to_height > 3 and recover_to_width > 3

@@ -59,7 +59,7 @@ def parse_args_main():
     parser.add_argument("--side_full_img",                         help="if true, the side images will not be cropped for better image wrapping", action='store_true' )
     parser.add_argument("--depth_weight_decay",        type=float, help="the coefficient of the weight for depth loss decay every epoch", default=1 )
     parser.add_argument("--use_l1_loss",                           help="if true, use l1 loss instead of silog loss for depth", action='store_true' )
-    parser.add_argument("--inbalance_to_closer",                   help="if true, and use_l1_loss is true, give higher weight for over-estimated depth, to prefer closer prediction", action='store_true' )
+    parser.add_argument("--inbalance_to_closer",       type=float, help="if true, and use_l1_loss is true, give higher weight for over-estimated depth, to prefer closer prediction", default=1 )
     
 
     # Preprocessing
