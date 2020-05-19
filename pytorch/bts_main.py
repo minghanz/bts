@@ -321,6 +321,9 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     else:
         print("Model Initialized")
 
+    print(torch.cuda.current_device())
+    print(torch.cuda.device_count())
+    
     global_step = 0
     # best_eval_measures_lower_better = torch.zeros(6).cpu() + 1e3
     # best_eval_measures_higher_better = torch.zeros(3).cpu()
@@ -451,6 +454,8 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                 enable_print()
         #######################################################################################################################
 
+        print('before entering the loop')
+        before_op_time = time.time()
         for step, sample_batched in enumerate(dataloader.data):
             if args.eval_time:
                 if args.gpu_sync:
@@ -458,7 +463,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                 timer.log('start_of_batch_iter', 1)
 
             optimizer.zero_grad()
-            before_op_time = time.time()
+            # before_op_time = time.time()
 
             ## network inference
             image = torch.autograd.Variable(sample_batched['image'].cuda(args.gpu, non_blocking=True))
@@ -605,7 +610,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
             ## printing and logging
             if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
                 if global_step % args.print_freq == 0 :
-                    print('[epoch][s/s_per_e/gs]: [{}][{}/{}/{}], lr: {:.12f}, loss: {:.12f}'.format(epoch, step, steps_per_epoch, global_step, current_lr, loss))
+                    print('[epoch][s/s_per_e/gs]: [{}][{}/{}/{}], lr: {:.12f}, loss: {:.12f}'.format(epoch, step, steps_per_epoch, global_step, current_lr, loss), flush=True)
                 if np.isnan(loss.cpu().item()):
                     print('NaN in loss occurred. Aborting training.')
                     mask = depth_gt_mask
@@ -621,6 +626,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                     return -1
 
             duration += time.time() - before_op_time
+            before_op_time = time.time()
             # if True:
             log_freq_cur = args.log_freq_ini if global_step <= 1000 else args.log_freq
             if global_step and global_step % log_freq_cur == 0 and not model_just_loaded:
@@ -635,7 +641,7 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
                 if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
                     print("{}".format(args.model_name))
                 print_string = 'GPU: {} | examples/s: {:4.2f} | loss: {:.5f} | var sum: {:.3f} avg: {:.3f} | time elapsed: {:.2f}h | time left: {:.2f}h'
-                print(print_string.format(args.gpu, examples_per_sec, loss, var_sum.item(), var_sum.item()/var_cnt, time_sofar, training_time_left))
+                print(print_string.format(args.gpu, examples_per_sec, loss, var_sum.item(), var_sum.item()/var_cnt, time_sofar, training_time_left), flush=True)
 
                 if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                                                             and args.rank % ngpus_per_node == 0):
