@@ -148,7 +148,10 @@ def test(params):
     print('Done.')
     
     # save_name = 'result_' + args.model_name + args.dataset
-    save_name = os.path.join('result_' + args.dataset, args.checkpoint_path)
+    if args.checkpoint_path[0] == '/':
+        save_name = os.path.join('result_' + args.dataset, args.checkpoint_path[1:])
+    else:
+        save_name = os.path.join('result_' + args.dataset, args.checkpoint_path)
 
     if args.save_np:
         depth_stack = np.stack(pred_depths)
@@ -156,7 +159,7 @@ def test(params):
         np.save(output_path, depth_stack)
         return
     
-    print('Saving result pngs..')
+    print('Saving result pngs to {}'.format(save_name))
     if not os.path.exists(os.path.dirname(save_name)):
         try:
             os.makedirs(save_name)

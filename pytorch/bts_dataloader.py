@@ -34,8 +34,8 @@ script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, "../../"))
 from c3d.utils_general.io import load_velodyne_points
 from c3d.utils.dataset_kitti import preload_K
-from c3d.utils.cam import lidar_to_depth, scale_K, scale_from_size, crop_and_scale_K, scale_image, CamScale, CamCrop, CamRotate, scale_depth_from_lidar, crop_and_scale_depth_from_lidar
-
+from c3d.utils.cam import scale_image, CamScale, CamCrop, CamRotate, scale_depth_from_lidar, crop_and_scale_depth_from_lidar
+from c3d.utils_general.calib import scale_K, scale_from_size, crop_and_scale_K, lidar_to_depth
 import re
 
 from kitti_split_processing import process_line

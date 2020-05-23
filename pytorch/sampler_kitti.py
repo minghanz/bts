@@ -8,7 +8,8 @@ import numpy as np
 import sys, os
 script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, "../../"))
-from c3d.utils.cam import lidar_to_depth, scale_K, scale_from_size, crop_and_scale_K, scale_image, CamCrop, CamScale
+from c3d.utils_general.calib import scale_K, scale_from_size, crop_and_scale_K, lidar_to_depth
+from c3d.utils.cam import scale_image, CamCrop, CamScale
 from c3d.utils.cam_proj import seq_ops_on_cam_info
 
 def scale_xy_crop(xy_crop, scale):

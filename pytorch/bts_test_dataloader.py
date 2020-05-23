@@ -9,7 +9,7 @@ script_path = os.path.dirname(__file__)
 sys.path.append(os.path.join(script_path, "../../"))
 from c3d.utils.cam_proj import CamProj
 from c3d.c3d_loss import C3DLoss
-from c3d.utils.cam import lidar_to_depth
+from c3d.utils_general.calib import lidar_to_depth
 from c3d.utils_general.vis import vis_depth_np, overlay_dep_on_rgb_np, vis_depth, overlay_dep_on_rgb, dep_img_bw, vis_depth_err, uint8_np_from_img_tensor, vis_pts_dist, comment_on_img, save_np_to_img
 
 inv_normalize = transforms.Normalize(
