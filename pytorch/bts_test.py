@@ -40,6 +40,7 @@ sys.path.append(os.path.join(script_path, '../../'))
 from c3d.utils.geometry import NormalFromDepthDense
 from c3d.utils_general.argparse_f import init_argparser_f
 from c3d.utils_general.vis import uint8_np_from_img_np, save_np_to_img, uint8_np_from_img_tensor, vis_depth_np
+from c3d.utils_general.dataset_read import DataReaderKITTI
 
 parser = init_argparser_f(description='BTS Pytorch test.')
 
@@ -85,7 +86,8 @@ def get_num_lines(file_path):
 def test(params):
     """Test function."""
     args.mode = 'test'
-    dataloader = BtsDataLoader(args, 'test')
+    data_meta_reader = DataReaderKITTI(data_root=args.data_path)
+    dataloader = BtsDataLoader(args, 'test', data_meta_reader)
     
     model = BtsModel(params=args)
     model = torch.nn.DataParallel(model)
@@ -101,6 +103,11 @@ def test(params):
     model.eval()
     model.cuda()
 
+    ########### general dataset
+    ntps = data_meta_reader.ffinder.ntps_from_split_file(args.filenames_file)
+    num_test_samples = len(ntps)
+
+    ###########
     num_test_samples = get_num_lines(args.filenames_file)
 
     with open(args.filenames_file) as f:
@@ -172,33 +179,36 @@ def test(params):
                 raise
     
     for s in tqdm(range(num_test_samples)):
+        rgb_path = data_meta_reader.ffinder.fname_from_ntp(ntps[s], 'rgb')
+        rgb_path = os.path.relpath(rgb_path, data_meta_reader.ffinder.data_root)
         if args.dataset == 'kitti':
-            date_drive = lines[s].split('/')[1]
-            filename_pred_png = save_name + '/raw/' + date_drive + '_' + lines[s].split()[0].split('/')[-1].replace(
+            date_drive = rgb_path.split('/')[1]
+            filename_pred_png = save_name + '/raw/' + date_drive + '_' + rgb_path.split('/')[-1].replace(
                 '.jpg', '.png')
-            filename_cmap_png = save_name + '/cmap/' + date_drive + '_' + lines[s].split()[0].split('/')[
+            filename_cmap_png = save_name + '/cmap/' + date_drive + '_' + rgb_path.split('/')[
                 -1].replace('.jpg', '.png')
-            filename_image_png = save_name + '/rgb/' + date_drive + '_' + lines[s].split()[0].split('/')[-1]
+            filename_image_png = save_name + '/rgb/' + date_drive + '_' + rgb_path.split('/')[-1]
         elif args.dataset == 'kitti_benchmark':
-            filename_pred_png = save_name + '/raw/' + lines[s].split()[0].split('/')[-1].replace('.jpg', '.png')
-            filename_cmap_png = save_name + '/cmap/' + lines[s].split()[0].split('/')[-1].replace('.jpg', '.png')
-            filename_image_png = save_name + '/rgb/' + lines[s].split()[0].split('/')[-1]
+            filename_pred_png = save_name + '/raw/' + rgb_path.split('/')[-1].replace('.jpg', '.png')
+            filename_cmap_png = save_name + '/cmap/' + rgb_path.split('/')[-1].replace('.jpg', '.png')
+            filename_image_png = save_name + '/rgb/' + rgb_path.split('/')[-1]
         else:
-            scene_name = lines[s].split()[0].split('/')[0]
-            filename_pred_png = save_name + '/raw/' + scene_name + '_' + lines[s].split()[0].split('/')[-1].replace(
+            scene_name = rgb_path.split('/')[0]
+            filename_pred_png = save_name + '/raw/' + scene_name + '_' + rgb_path.split('/')[-1].replace(
                 '.jpg', '.png')
-            filename_cmap_png = save_name + '/cmap/' + scene_name + '_' + lines[s].split()[0].split('/')[-1].replace(
+            filename_cmap_png = save_name + '/cmap/' + scene_name + '_' + rgb_path.split('/')[-1].replace(
                 '.jpg', '.png')
-            filename_gt_png = save_name + '/gt/' + scene_name + '_' + lines[s].split()[0].split('/')[-1].replace(
+            filename_gt_png = save_name + '/gt/' + scene_name + '_' + rgb_path.split('/')[-1].replace(
                 '.jpg', '.png')
-            filename_image_png = save_name + '/rgb/' + scene_name + '_' + lines[s].split()[0].split('/')[-1]
+            filename_image_png = save_name + '/rgb/' + scene_name + '_' + rgb_path.split('/')[-1]
         
-        rgb_path = os.path.join(args.data_path, './' + lines[s].split()[0])
+        rgb_path = os.path.join(args.data_path, './' + rgb_path)
         image = cv2.imread(rgb_path)
-        if args.dataset == 'nyu':
-            gt_path = os.path.join(args.data_path, './' + lines[s].split()[1])
-            gt = cv2.imread(gt_path, -1).astype(np.float32) / 1000.0  # Visualization purpose only
-            gt[gt == 0] = np.amax(gt)
+        ### TODO: haven't adapt to nyu yet
+        # if args.dataset == 'nyu':
+        #     gt_path = os.path.join(args.data_path, './' + lines[s].split()[1])
+        #     gt = cv2.imread(gt_path, -1).astype(np.float32) / 1000.0  # Visualization purpose only
+        #     gt[gt == 0] = np.amax(gt)
         
         pred_depth = pred_depths[s]
         pred_8x8 = pred_8x8s[s]

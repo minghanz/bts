@@ -341,7 +341,12 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     best_eval_steps_dep = np.zeros(9, dtype=np.int32)
 
     # DataReader
-    data_meta_reader = DataReaderKITTI(data_root=args.data_path)        ### TODO: args.data_path_eval is not used
+    data_meta_reader = DataReaderKITTI(data_root=args.data_path)
+    assert args.data_path == args.data_path_eval
+    if args.data_path == args.data_path_eval:
+        data_meta_reader_eval = data_meta_reader
+    else:
+        data_meta_reader_eval = DataReaderKITTI(data_root=args.data_path_eval)
 
     # CamProj Module
     cam_proj_model = CamProj(data_meta_reader, batch_size=args.batch_size)
@@ -396,8 +401,8 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     cudnn.benchmark = True
 
     dataloader = BtsDataLoader(args, 'train', data_meta_reader, cam_proj=cam_proj_model)
-    dataloader_eval_raw = BtsDataLoader(args, 'online_eval', data_meta_reader, data_source='kitti_raw')
-    dataloader_eval_dep = BtsDataLoader(args, 'online_eval', data_meta_reader, data_source='kitti_depth')
+    dataloader_eval_raw = BtsDataLoader(args, 'online_eval', data_meta_reader_eval, data_source='kitti_raw')
+    dataloader_eval_dep = BtsDataLoader(args, 'online_eval', data_meta_reader_eval, data_source='kitti_depth')
 
     # Logging
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):

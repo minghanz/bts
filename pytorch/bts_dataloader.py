@@ -127,18 +127,19 @@ class DataLoadPreprocess(Dataset):
         else:
             self.ntps = self.datareader.ntps_from_split_file(args.filenames_file)
 
-        self.ntp_idxs_in_dict = self.datareader.ffinder.finfos_idx_from_ntps(self.ntps)
-
-        if self.args.dataset == "kitti":
-            self.ntp_idxs_to_sample = samp_from_ntp(self.ntps, self.ntp_idxs_in_dict, args.seq_frame_n_c3d, args.seq_frame_n_pho)
-
-        if self.args.dataset == "kitti":
-            group_key = ['date']
-        elif self.args.dataset == "waymo":
-            group_key = ['seq']
-        self.ntp_idxs_to_sample_ingroup = group_ntp(self.ntps, self.ntp_idxs_to_sample, group_key)
-
         if mode =='train':
+            self.ntp_idxs_in_dict = self.datareader.ffinder.finfos_idx_from_ntps(self.ntps)
+
+            if self.args.dataset == "kitti":
+                self.ntp_idxs_to_sample = samp_from_ntp(self.ntps, self.ntp_idxs_in_dict, args.seq_frame_n_c3d, args.seq_frame_n_pho)
+
+            if self.args.dataset == "kitti":
+                group_key = ['date']
+            elif self.args.dataset == "waymo":
+                group_key = ['seq']
+            self.ntp_idxs_to_sample_ingroup = group_ntp(self.ntps, self.ntp_idxs_to_sample, group_key)
+
+
             self.rand_crop_done_indv = self.args.seq_frame_n_c3d == 1
             self.side_img_needed = self.args.seq_frame_n_pho > 1
             self.scale_img_needed = self.rand_crop_done_indv and self.args.seq_frame_n_pho > 1 and self.args.other_scale > 0
@@ -591,7 +592,10 @@ class DataLoadPreprocess(Dataset):
     
     def __len__(self):
         # return len(self.filenames)
-        return len(self.ntp_idxs_to_sample)
+        if self.mode == 'train':
+            return len(self.ntp_idxs_to_sample)
+        else:
+            return len(self.ntps)
 
 def need_totensor(x):
     if isinstance(x, list):
