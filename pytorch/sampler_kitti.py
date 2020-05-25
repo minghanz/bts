@@ -12,6 +12,10 @@ from c3d.utils_general.calib import scale_K, scale_from_size, crop_and_scale_K, 
 from c3d.utils.cam import scale_image, CamCrop, CamScale
 from c3d.utils.cam_proj import seq_ops_on_cam_info
 
+###################### general dataset interface
+from c3d.utils_general.dataset_find import retrieve_at_level
+
+
 def scale_xy_crop(xy_crop, scale):
     apply_scale = 1 / scale
     assert apply_scale != 0
@@ -172,7 +176,7 @@ class Collate_Cfg:
                 for batchi in batch:
                     (x_start, y_start, x_size, y_size) = batchi['xy_crop']
                     batchi['xy_crop'] = (x_start + w_start, y_start + h_start, self.net_input_width, self.net_input_height)
-                    batchi['xy_crop'] = tuple(np.float32(elem) for elem in batchi['xy_crop'])
+                    batchi['xy_crop'] = tuple(np.float32(ele) for ele in batchi['xy_crop'])
                 
                 ##################### scaling
                 if self.scale_img_needed:
@@ -216,9 +220,9 @@ class Collate_Cfg:
                     new_batch['scale_cam_ops'] = scale_cam_ops
 
                 ##################### cam_info
-                date_side = (new_batch['date_str'][0], int(new_batch['side'][0]) )
-                # cam_info = self.cam_proj.prepare_cam_info(date_side=date_side, xy_crop=new_batch['xy_crop'])
-                cam_info_ori = self.cam_proj.prepare_cam_info(date_side=date_side)
+                ntp_0 = elem['ntp']
+                ntp_cam = self.cam_proj.dataset_reader.ffinder.ntp_ftype_convert(ntp_0, ftype='calib')
+                cam_info_ori = self.cam_proj.prepare_cam_info(key=ntp_cam)
                 cam_info = seq_ops_on_cam_info(cam_info_ori, new_batch['cam_ops'])
                 new_batch['cam_info'] = cam_info
 
@@ -260,9 +264,9 @@ class Collate_Cfg:
                 # new_batch = {key: self.collate_common_crop([d[key] for d in batch]) for key in elem}
 
                 ##################### cam_info
-                date_side = (new_batch['date_str'][0], int(new_batch['side'][0]) )
-                # cam_info = self.cam_proj.prepare_cam_info(date_side=date_side, xy_crop=new_batch['xy_crop'])
-                cam_info = self.cam_proj.prepare_cam_info(date_side=date_side)
+                ntp_0 = elem['ntp']
+                ntp_cam = self.cam_proj.dataset_reader.ffinder.ntp_ftype_convert(ntp_0, ftype='calib')
+                cam_info = self.cam_proj.prepare_cam_info(key=ntp_cam)
                 cam_ops_list = new_batch['cam_ops']
                 cam_info_main = seq_ops_on_cam_info(cam_info, cam_ops_list)
                 new_batch['cam_info'] = cam_info_main
@@ -310,7 +314,56 @@ def check_need_to_sample(frame, frame_idxs, frame_idxs_to_sample, seq_frame_n):
         need = need and frame+i not in frame_idxs_to_sample
         
     return need
+############################################# with new interface
+def check_neighbor_exist_ntp(ntp, ntps, seq_frame_n):
+    follow = (seq_frame_n - 1) // 2
+    front = seq_frame_n - 1 - follow
+    need = True
+    need = need and ntp in ntps
+    for i in range(1, follow+1):
+        ntp_new = ntp._replace(fid=ntp.fid+i)
+        need = need and ntp_new in ntps
+    for i in range(1, front+1):
+        ntp_new = ntp._replace(fid=ntp.fid-i)
+        need = need and ntp_new in ntps
 
+    return need
+    
+def check_need_to_sample_ntp(ntp, ntps, ntp_idxs_to_sample, ntp_idx_dict, seq_frame_n):
+    need = True
+    for i in range(seq_frame_n):
+        ntp_new = ntp._replace(fid=ntp.fid+i)
+        need = need and ntp_new in ntps
+        ntp_new = ntp._replace(fid=ntp.fid-i)
+        idx_new = retrieve_at_level(ntp_idx_dict, *dict(ntp_new) )
+        need = need and idx_new not in ntp_idxs_to_sample
+        ntp_new = ntp._replace(fid=ntp.fid+i)
+        idx_new = retrieve_at_level(ntp_idx_dict, *dict(ntp_new) )
+        need = need and idx_new not in ntp_idxs_to_sample
+
+    return need
+
+def samp_from_ntp(ntps, ntp_idx_dict, seq_frame_n_c3d, seq_frame_n_pho):
+    ntp_idxs_to_sample = []
+
+    for i, ntp in enumerate(ntps):
+        condition = check_neighbor_exist_ntp(ntp, ntps, seq_frame_n_pho) and check_need_to_sample_ntp(ntp, ntps, ntp_idxs_to_sample, ntp_idx_dict, seq_frame_n_c3d)
+        if condition:
+            ntp_idxs_to_sample.append(i)
+    return ntp_idxs_to_sample
+
+def group_ntp(ntps, ntp_idxs, group_key):
+    ntp_idx_group = {}
+
+    for idx in ntp_idxs:
+        tuple_key = tuple(getattr(ntps[idx], key) for key in group_key)
+        if tuple_key not in ntp_idx_group:
+            ntp_idx_group[tuple_key] = []
+        ntp_idx_group[tuple_key].append(idx)
+
+    return ntp_idx_group
+
+################################################## 
 def samp_from_seq(frame_idxs, line_idxs, seq_frame_n_c3d, seq_frame_n_pho):
     '''Samp once every seq_frame_n frames in a date-seq-side sequence
     '''
@@ -384,18 +437,19 @@ class SamplerKITTI(Sampler):
             
         ### we want to first sample date, then sample data
         self.sub_sizes = {}
-        self.sub_idxs = []
-        for key in self.dataset.lines_group:
-            self.sub_sizes[key] = len(self.dataset.lines_group[key])
-            idx = [key] * self.sub_sizes[key]
-            self.sub_idxs.extend(idx)
-        assert len(self.sub_idxs) == sum([self.sub_sizes[key] for key in self.dataset.lines_group]), "The number of samples are the the same as the sum of each subset"
-        # self.num_samples = len(self.sub_idxs)
-        self.hlvl_sampler = SubsetRandomSampler(self.sub_idxs)
+        self.group_keys = []
+        ################################ general dataset interface
+        for key in self.dataset.ntp_idxs_to_sample_ingroup:
+            self.sub_sizes[key] = len(self.dataset.ntp_idxs_to_sample_ingroup[key])
+            key_dups = [key] * self.sub_sizes[key]
+            self.group_keys.extend(key_dups)
+        assert len(self.group_keys) == sum([self.sub_sizes[key] for key in self.dataset.ntp_idxs_to_sample_ingroup]), "The number of samples are the the same as the sum of each subset"
+        # self.num_samples = len(self.group_keys)
+        self.hlvl_sampler = SubsetRandomSampler(self.group_keys)
 
         self.sub_samplers = {}
-        for key in self.dataset.lines_group:
-            self.sub_samplers[key] = SubsetRandomSampler(self.dataset.lines_group[key])
+        for key in self.dataset.ntp_idxs_to_sample_ingroup:
+            self.sub_samplers[key] = SubsetRandomSampler(self.dataset.ntp_idxs_to_sample_ingroup[key])
 
     def __iter__(self): ## The dataloader creates the iterator object at the beginning of for loop        
         sub_iters = {}
@@ -411,11 +465,14 @@ class SamplerKITTI(Sampler):
             while True:
                 try:
                     idx = next(sub_iters[key])
-                    date, seq_side, frame = self.dataset.line2frame[idx]
+                    ntp = self.dataset.ntps[idx]
                     if self.seq_frame_n_c3d > 1:
                         idx_next = []
                         for i in range(1, self.seq_frame_n_c3d):
-                            idx_next.append(self.dataset.frame2line[(date, seq_side, frame+i)])
+                            ntp_next = ntp._replace(fid=ntp.fid+i)
+                            idx_next_cur = retrieve_at_level(self.dataset.ntp_idxs_in_dict, *[*ntp_next]) 
+                            # idx_next_cur = seld.dataset.ntps.index(ntp_next) ### this might be slow
+                            idx_next.append(idx_next_cur)
 
                 except StopIteration:
                     end_reached[key] = True

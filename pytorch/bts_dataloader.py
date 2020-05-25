@@ -40,6 +40,10 @@ import re
 
 from kitti_split_processing import process_line
 
+################## general dataset interface
+from sampler_kitti import samp_from_ntp, group_ntp
+############################################
+
 def _is_pil_image(img):
     return isinstance(img, Image.Image)
 
@@ -55,9 +59,9 @@ def preprocessing_transforms(mode):
 
 
 class BtsDataLoader(object):
-    def __init__(self, args, mode, data_source=None, cam_proj=None):
+    def __init__(self, args, mode, datareader, data_source=None, cam_proj=None):
         if mode == 'train':
-            self.training_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode), data_source=data_source)
+            self.training_samples = DataLoadPreprocess(args, mode, datareader, transform=preprocessing_transforms(mode), data_source=data_source)
             if args.distributed:
                 self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.training_samples)
                 
@@ -79,7 +83,7 @@ class BtsDataLoader(object):
 
         ## for batch size 1, there is no need to use SamplerKITTI
         elif mode == 'online_eval':
-            self.testing_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode), data_source=data_source)
+            self.testing_samples = DataLoadPreprocess(args, mode, datareader, transform=preprocessing_transforms(mode), data_source=data_source)
             if args.distributed:
                 # self.eval_sampler = torch.utils.data.distributed.DistributedSampler(self.testing_samples, shuffle=False)
                 self.eval_sampler = DistributedSamplerNoEvenlyDivisible(self.testing_samples, shuffle=False)
@@ -92,7 +96,7 @@ class BtsDataLoader(object):
                                    sampler=self.eval_sampler)
         
         elif mode == 'test':
-            self.testing_samples = DataLoadPreprocess(args, mode, transform=preprocessing_transforms(mode), data_source=data_source)
+            self.testing_samples = DataLoadPreprocess(args, mode, datareader, transform=preprocessing_transforms(mode), data_source=data_source)
             self.data = DataLoader(self.testing_samples, 1, shuffle=False, num_workers=1)
 
         else:
@@ -100,7 +104,7 @@ class BtsDataLoader(object):
             
             
 class DataLoadPreprocess(Dataset):
-    def __init__(self, args, mode, transform=None, data_source=None):
+    def __init__(self, args, mode, datareader, transform=None, data_source=None):
         self.args = args
         if mode == 'online_eval':
             with open(args.filenames_file_eval, 'r') as f:
@@ -116,49 +120,35 @@ class DataLoadPreprocess(Dataset):
 
         self.dilate_struct = np.ones((35, 35))
 
-        # ## separate the lines to different dates
-        # self.lines_in_date = {}
-        # dates = ["2011_09_26", "2011_09_28", "2011_09_29", "2011_09_30", "2011_10_03"]
-        # for date in dates:
-        #     self.lines_in_date[date] = []
-        
-        # for i, line in enumerate(self.filenames):
-        #     date = line.split('/')[0]
-        #     assert date in dates
-        #     self.lines_in_date[date].append(i)
+        ###################################### using general dataset interface
+        # if self.mode == 'online_eval':
+        #     data_path = self.args.data_path_eval
+        # else:
+        #     data_path = self.args.data_path
+        # self.datareader = DataReaderKITTI(data_root=data_path)
+        self.datareader = datareader
+
+        self.ntps = self.datareader.ntps_from_split_file(self.filenames)
+        self.ntp_idxs_in_dict = self.datareader.ffinder.finfos_idx_from_ntps(ntps)
+
+        if self.args.dataset == "kitti":
+            self.ntp_idxs_to_sample = samp_from_ntp(self.ntps, self.ntp_idxs_in_dict, args.seq_frame_n_c3d, args.seq_frame_n_pho)
+
+        if self.args.dataset == "kitti":
+            group_key = ['date']
+        elif self.args.dataset == "waymo":
+            group_key = ['seq']
+        self.ntp_idxs_to_sample_ingroup = group_ntp(self.ntps, self.ntp_idxs_to_sample, group_key)
 
         if mode =='train':
-            ## process lines and retrive date, seq, side and frame
-            self.line_idx = {}
-            self.frame_idx = {}
-            for i, line in enumerate(self.filenames):
-                date, seq, side, frame = process_line(line)
-                if date not in self.line_idx:
-                    self.line_idx[date] = {}
-                    self.frame_idx[date] = {}
-                if (seq, side) not in self.line_idx[date]:
-                    self.line_idx[date][(seq, side)] = []
-                    self.frame_idx[date][(seq, side)] = []
-                self.line_idx[date][(seq, side)].append(i)
-                self.frame_idx[date][(seq, side)].append(frame)
-
-            ### generate both-direction mapping
-            self.frame2line, self.line2frame = frame_line_mapping(self.frame_idx, self.line_idx)
-
-            ### for each (date, seq, side), get sample points, which should be sampled from
-            frame_idxs_to_sample, line_idx_to_sample = samp_from_seq(self.frame_idx, self.line_idx, args.seq_frame_n_c3d, args.seq_frame_n_pho)
-            self.lines_group = gen_samp_list(line_idx_to_sample, use_date_key=args.batch_same_intr) #every mini-batch should be sampled from the same group
-
             self.rand_crop_done_indv = self.args.seq_frame_n_c3d == 1
             self.side_img_needed = self.args.seq_frame_n_pho > 1
             self.scale_img_needed = self.rand_crop_done_indv and self.args.seq_frame_n_pho > 1 and self.args.other_scale > 0
             self.velo_needed = self.args.keep_velo
             self.dont_crop_side = self.args.side_full_img
 
-
-        self.K_dict = preload_K(args.data_path)
-
-        self.regex_dep2lid = re.compile('.+?sync')
+        # self.K_dict = self.datareader.preload_dict['calib']     # may not need this
+        ######################################
 
         if mode != 'test':  # in test mode, data_source is not used
             if data_source is None:
@@ -258,11 +248,13 @@ class DataLoadPreprocess(Dataset):
                 mask_gt = np.expand_dims(mask_gt, axis=2)
                 mask = np.expand_dims(mask, axis=2)
 
-            ## get the depth map of true scale
-            if self.args.dataset == 'nyu':
-                image = image / 1000.0
-            elif self.data_source == 'kitti_depth':
-                image = image / 256.0
+            # # ###################### not needed if using general dataset interface
+            # ## get the depth map of true scale
+            # if self.args.dataset == 'nyu':
+            #     image = image / 1000.0
+            # elif self.data_source == 'kitti_depth':
+            #     image = image / 256.0
+            # ########################
 
         if need_crop and self.rand_crop_done_indv:
             ## random crop
@@ -334,45 +326,43 @@ class DataLoadPreprocess(Dataset):
                     return image
 
     def __getitem__(self, idx):
-        sample_path = self.filenames[idx]
-        focal = float(sample_path.split()[2])
+        ############################# general dataset interface
+        focal = 721.5377
+        sample_ntp = self.ntps[idx]
 
-        path_strs = sample_path.split()[0].split('/')
-        date_str = path_strs[0]
-        seq_str = path_strs[1]
-        seq_n = int(seq_str.split('_drive_')[1].split('_')[0])  # integer of the sequence number
-        side = int(path_strs[2].split('_')[1])
-        frame = int(path_strs[-1].split('.')[0])
+        if self.mode in ['train', 'online_eval']:
+            wanted_ftype_list = ['rgb', 'calib', 'T_rgb']
+            if self.data_source == 'kitti_depth':
+                wanted_ftype_list.append('depth_dense')
+            elif self.data_source == 'kitti_raw':
+                wanted_ftype_list.append('lidar')
+                wanted_ftype_list.append('depth_dense')  ## in this case, 'depth_dense' is only used to check has_valid_depth
+            else:
+                raise ValueError('data_source not recognized')
+        else:
+            wanted_ftype_list = ['rgb']
+
+        data_dict = self.datareader.read_datadict_from_ntp(sample_ntp, wanted_ftype_list)
+        image = data_dict['rgb']
+
+        if self.mode in ['train', 'online_eval']:
+            T = data_dict['T_rgb']
+            has_valid_depth = data_dict['depth_dense'] is not None
+
+            if self.data_source == 'kitti_depth':
+                depth_gt = data_dict['depth_dense']
+            elif self.data_source == 'kitti_raw':
+                velo = data_dict['lidar']
+                K_unit = data_dict['calib'].K_unit
+                extr_cam_li = data_dict['calib'].P_cam_li
+                im_shape = (data_dict['calib'].height, data_dict['calib'].width)
+                depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape, torch_mode=False)
+            else:
+                raise ValueError('data_source not recognized')
+                
+        #######################################################
 
         if self.mode == 'train':
-            if self.args.dataset == 'kitti' and self.args.use_right is True and random.random() > 0.5:
-                image_path = os.path.join(self.args.data_path, "./" + sample_path.split()[3])
-                depth_path = os.path.join(self.args.gt_path, "./" + sample_path.split()[4])
-            else:
-                image_path = os.path.join(self.args.data_path, "./" + sample_path.split()[0])
-                depth_path = os.path.join(self.args.gt_path, "./" + sample_path.split()[1])
-    
-            ## load image and depth
-            image = Image.open(image_path)
-            if self.data_source == 'kitti_depth':
-                depth_gt = Image.open(depth_path)
-            elif self.data_source == 'kitti_raw':
-                seq_path = self.regex_dep2lid.search(depth_path)
-                seq_path = seq_path.group(0)
-                lidar_path = os.path.join(seq_path, 'velodyne_points', 'data', '{:010d}.bin'.format(frame))
-                # 2011_09_26/2011_09_26_drive_0001_sync/velodyne_points/data/0000000000.bin
-                velo = load_velodyne_points(lidar_path)
-                velo = velo[ velo[:, 0] >= 0, : ]
-                K_unit = self.K_dict[(date_str, side)].K_unit
-                extr_cam_li = self.K_dict[(date_str, side)].P_cam_li
-                im_shape = (image.height, image.width)
-                assert image.height == self.K_dict[(date_str, side)].height
-                assert image.width == self.K_dict[(date_str, side)].width
-                depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape, torch_mode=False)
-                depth_gt = Image.fromarray(depth_gt.astype(np.float32), 'F') #mode 'F' means float32
-            else:
-                raise ValueError("self.data_source not recognized")
-            
             ## log the image operations for later intrinsics and CamInfo processing
             cam_ops = []
             if self.scale_img_needed:
@@ -431,14 +421,6 @@ class DataLoadPreprocess(Dataset):
             ## Minghan: random flip disabled
             image_aug, depth_gt, mask, mask_gt = self.train_preprocess(image, depth_gt, mask, mask_gt)
 
-            ## get global pose of the camera
-            pose_file = os.path.join(self.args.data_path, date_str, seq_str, 'poses', 'cam_{:02d}.txt'.format(side))
-            with open(pose_file) as f:
-                T_lines = f.readlines()
-            cur_line = T_lines[frame]
-            T = np.array( list(map(float, cur_line.split())) ).reshape(3,4)
-            T = np.vstack( (T, np.array([[0,0,0,1]]))).astype(np.float32)
-
             ## load neighbor images in seq_aside mode
             if self.side_img_needed:
                 ## use the same randomized quantity as the curent frame
@@ -452,19 +434,13 @@ class DataLoadPreprocess(Dataset):
                 for offset in range(-front, follow+1):
                     if offset == 0:
                         continue
-                    ## load image
-                    line_cur = self.frame2line[(date_str, (seq_n, side), frame+offset)]
-                    image_path_cur = os.path.join(self.args.data_path, "./" + self.filenames[line_cur].split()[0])
-                    image_cur = Image.open(image_path_cur)
-                    # if self.args.init_scaling != 1:
-                    #     init_width = int(image_cur.width / self.args.init_scaling)
-                    #     init_height = int(image_cur.height / self.args.init_scaling)
-                    #     image_cur = scale_image(image_cur, new_width=init_width, new_height=init_height, torch_mode=True, raw_float=False, nearest=False, align_corner=False)
-                    image_cur = self.image_process(image_cur, mode='img', need_mask=False, need_crop=(not self.dont_crop_side), op_params=op_params)
-                    ## load pose
-                    T_cur_line = T_lines[frame+offset]
-                    T_cur = np.array( list(map(float, T_cur_line.split())) ).reshape(3,4)
-                    T_cur = np.vstack( (T_cur, np.array([[0,0,0,1]]))).astype(np.float32)
+                    ############################################# general dataset interface
+                    ntp_side = sample_ntp._replace(fid=sample_ntp.fid+offset)
+                    wanted_ftype_list_side = ['rgb', 'T_rgb']
+                    data_dict_side = self.datareader.read_datadict_from_ntp(ntp_side, wanted_ftype_list_side)
+                    image_cur = data_dict_side['rgb']
+                    T_cur = data_dict_side['T_rgb']
+                    ##############################################
 
                     T_side.append(T_cur)
                     image_side.append(image_cur)
@@ -486,7 +462,7 @@ class DataLoadPreprocess(Dataset):
 
             xy_crop = tuple(np.float32(elem) for elem in xy_crop)
             sample = {'image': image_aug, 'image_ori':image, 'depth': depth_gt, 'focal': focal, 'mask': mask, 'mask_gt': mask_gt, 
-                            'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T, 
+                            'xy_crop': xy_crop, 'seq': seq_n, 'T': T, 'ntp': sample_ntp
                             'cam_ops': cam_ops}
 
             if self.side_img_needed:
@@ -498,61 +474,20 @@ class DataLoadPreprocess(Dataset):
             if self.velo_needed:
                 sample.update({'velo': velo})
         else:
-            if self.mode == 'online_eval':
-                data_path = self.args.data_path_eval
-            else:
-                data_path = self.args.data_path
+            image = image / 255.0
+            ######################################### general dataset interface
+            if self.mode == 'online_eval' and has_valid_depth:
+                mask_gt = depth_gt > 0
+                mask = binary_closing(mask_gt, self.dilate_struct)
 
-            image_path = os.path.join(data_path, "./" + sample_path.split()[0])
-            image = np.asarray(Image.open(image_path), dtype=np.float32) / 255.0
+                depth_gt = np.expand_dims(depth_gt, axis=2)
+                if self.args.dataset == 'nyu':
+                    depth_gt = depth_gt / 1000.0
+                elif self.data_source == 'kitti_depth':
+                    depth_gt = depth_gt / 256.0
 
-            if self.mode == 'online_eval':
-                gt_path = self.args.gt_path_eval
-                depth_path = os.path.join(gt_path, "./" + sample_path.split()[1])
-                has_valid_depth = False
-                try:
-                    depth_gt = Image.open(depth_path)
-                    has_valid_depth = True
-                except IOError:
-                    depth_gt = False
-                    # print('Missing gt for {}'.format(image_path))
-                    mask_gt = False
-                    mask = False
-
-                if has_valid_depth:
-                    if self.data_source == 'kitti_depth':
-                        depth_gt = np.asarray(depth_gt, dtype=np.float32)
-                    elif self.data_source == 'kitti_raw':
-                        seq_path = self.regex_dep2lid.search(depth_path)
-                        seq_path = seq_path.group(0)
-                        lidar_path = os.path.join(seq_path, 'velodyne_points', 'data', '{:010d}.bin'.format(frame))
-                        # 2011_09_26/2011_09_26_drive_0001_sync/velodyne_points/data/0000000000.bin
-                        velo = load_velodyne_points(lidar_path)
-                        velo = velo[ velo[:, 0] >= 0, : ]
-                        K_unit = self.K_dict[(date_str, side)].K_unit
-                        extr_cam_li = self.K_dict[(date_str, side)].P_cam_li
-                        im_shape = (image.shape[0], image.shape[1])
-                        assert image.shape[0] == self.K_dict[(date_str, side)].height
-                        assert image.shape[1] == self.K_dict[(date_str, side)].width
-                        depth_gt = lidar_to_depth(velo, extr_cam_li, K_unit, im_shape, torch_mode=False)
-                        depth_gt = depth_gt.astype(np.float32)
-                        # depth_gt = Image.fromarray(depth_gt.astype(np.float32), 'F') #mode 'F' means float32
-                        # depth_gt_ary = np.array(depth_gt)
-                        # print(depth_gt_ary.min(), depth_gt_ary.max(), depth_gt_ary.dtype)
-                    else:
-                        raise ValueError("self.data_source not recognized")
-
-                    mask_gt = depth_gt > 0
-                    mask = binary_closing(mask_gt, self.dilate_struct)
-
-                    depth_gt = np.expand_dims(depth_gt, axis=2)
-                    if self.args.dataset == 'nyu':
-                        depth_gt = depth_gt / 1000.0
-                    elif self.data_source == 'kitti_depth':
-                        depth_gt = depth_gt / 256.0
-
-                    mask_gt = np.expand_dims(mask_gt, axis=2)
-                    mask = np.expand_dims(mask, axis=2)
+                mask_gt = np.expand_dims(mask_gt, axis=2)
+                mask = np.expand_dims(mask, axis=2)
 
             if self.args.do_kb_crop is True:
                 height = image.shape[0]
@@ -588,16 +523,8 @@ class DataLoadPreprocess(Dataset):
                 image = scale_image(image, new_width=self.args.init_width, new_height=self.args.init_height, torch_mode=True, raw_float=False, nearest=False, align_corner=False)
 
             if self.mode == 'online_eval':
-                ## get global pose of the camera
-                pose_file = os.path.join(self.args.data_path, date_str, seq_str, 'poses', 'cam_{:02d}.txt'.format(side))
-                with open(pose_file) as f:
-                    cur_line = f.readlines()[frame]
-                T = np.array( list(map(float, cur_line.split())) ).reshape(3,4)
-                T = np.vstack( (T, np.array([[0,0,0,1]]))).astype(np.float32)
-            
-            if self.mode == 'online_eval':
                 sample = {'image': image, 'depth': depth_gt, 'focal': focal, 
-                            'has_valid_depth': has_valid_depth, 'mask': mask, 'mask_gt': mask_gt, 'date_str': date_str, 'side': side, 'xy_crop': xy_crop, 'seq': seq_n, 'frame': frame, 'T': T}
+                            'has_valid_depth': has_valid_depth, 'mask': mask, 'mask_gt': mask_gt, 'xy_crop': xy_crop, 'T': T, 'ntp': sample_ntp}
             else:   ## i.e. self.mode == 'test'. Only input image is needed. 
                 sample = {'image': image, 'focal': focal}
         

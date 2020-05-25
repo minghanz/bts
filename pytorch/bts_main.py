@@ -53,6 +53,8 @@ from c3d.utils_general.vis import vis_normal, vis_depth, overlay_dep_on_rgb, uin
 from c3d.utils_general.timing import Timing
 from c3d.utils.cam import scale_image
 
+from c3d.utils_general.dataset_read import DataReaderKITTI
+
 # from bts_utils import vis_depth, overlay_dep_on_rgb
 
 if sys.argv.__len__() == 2:
@@ -338,8 +340,11 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
     best_eval_measures_higher_better_dep = torch.zeros(3).cpu()
     best_eval_steps_dep = np.zeros(9, dtype=np.int32)
 
+    # DataReader
+    data_meta_reader = DataReaderKITTI(data_root=args.data_path)        ### TODO: args.data_path_eval is not used
+
     # CamProj Module
-    cam_proj_model = CamProj(args.data_path, batch_size=args.batch_size)
+    cam_proj_model = CamProj(data_meta_reader, batch_size=args.batch_size)
 
     # C3D module
     c3d_model = C3DLoss(seq_frame_n=args.seq_frame_n_c3d)
@@ -390,9 +395,9 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
     cudnn.benchmark = True
 
-    dataloader = BtsDataLoader(args, 'train', cam_proj=cam_proj_model)
-    dataloader_eval_raw = BtsDataLoader(args, 'online_eval', data_source='kitti_raw')
-    dataloader_eval_dep = BtsDataLoader(args, 'online_eval', data_source='kitti_depth')
+    dataloader = BtsDataLoader(args, 'train', data_meta_reader, cam_proj=cam_proj_model)
+    dataloader_eval_raw = BtsDataLoader(args, 'online_eval', data_meta_reader, data_source='kitti_raw')
+    dataloader_eval_dep = BtsDataLoader(args, 'online_eval', data_meta_reader, data_source='kitti_depth')
 
     # Logging
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
