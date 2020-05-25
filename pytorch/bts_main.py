@@ -472,6 +472,10 @@ def main_worker(gpu, ngpus_per_node, args, args_rest):
 
             optimizer.zero_grad()
             # before_op_time = time.time()
+            # print(sample_batched['image'].max(), sample_batched['image'].min())
+            # print(sample_batched['focal'])
+            # print(sample_batched['depth'].max(), sample_batched['depth'].min())
+            # print(sample_batched['T'])
 
             ## network inference
             image = torch.autograd.Variable(sample_batched['image'].cuda(args.gpu, non_blocking=True))
